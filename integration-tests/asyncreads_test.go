@@ -252,7 +252,7 @@ func TestAsyncReadsRequestTypes(t *testing.T) {
 			},
 			expectedOpCode:         primitive.OpCodeResult,
 			sentPrimary:            true,
-			sentSecondary:          true,
+			sentSecondary:          false,
 			sentAsync:              true,
 			primedQuery:            nil,
 			prepared:               true,

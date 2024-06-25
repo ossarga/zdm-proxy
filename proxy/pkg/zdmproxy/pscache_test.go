@@ -1,6 +1,7 @@
 package zdmproxy
 
 import (
+	"crypto/md5"
 	"fmt"
 	"testing"
 
@@ -16,7 +17,7 @@ const InterceptedIdPrefix = "interceptedId_"
 type CacheMapType string
 
 const (
-	CacheMapTypeOrigin      = CacheMapType("CACHE-ORIGIN")
+	CacheMapTypeOrigin      = CacheMapType("INDEX-ORIGIN")
 	CacheMapTypeTarget      = CacheMapType("INDEX-TARGET")
 	CacheMapTypeIntercepted = CacheMapType("INTERCEPTED")
 	CacheMapTypeNone        = CacheMapType("NONE")
@@ -80,8 +81,6 @@ func TestPreparedStatementCache_StoreIntoAllCacheMaps(t *testing.T) {
 		},
 	}
 
-	dummyPrepareRequestInfo := NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), []*term{}, false, "", "")
-
 	for _, test := range tests {
 		t.Run(test.name, func(tt *testing.T) {
 			psCache, err := NewPreparedStatementCache(MaxPSCacheSizeForTests)
@@ -96,12 +95,7 @@ func TestPreparedStatementCache_StoreIntoAllCacheMaps(t *testing.T) {
 					targetPreparedResult := &message.PreparedResult{
 						PreparedQueryId: []byte(fmt.Sprint(TargetIdPrefix, i)),
 					}
-					psCache.Store(originPreparedResult, targetPreparedResult, dummyPrepareRequestInfo)
-
-					interceptedPreparedResult := &message.PreparedResult{
-						PreparedQueryId: []byte(fmt.Sprint(InterceptedIdPrefix, i)),
-					}
-					psCache.StoreIntercepted(interceptedPreparedResult, dummyPrepareRequestInfo)
+					psCache.StorePreparedOnBoth(originPreparedResult, targetPreparedResult, createDummyPrepareRequestInfo(fmt.Sprintf("query_%d", i)))
 				}
 			} else {
 				// fill the cache
@@ -112,23 +106,18 @@ func TestPreparedStatementCache_StoreIntoAllCacheMaps(t *testing.T) {
 					targetPreparedResult := &message.PreparedResult{
 						PreparedQueryId: []byte(fmt.Sprint(TargetIdPrefix, i)),
 					}
-					psCache.Store(originPreparedResult, targetPreparedResult, dummyPrepareRequestInfo)
-
-					interceptedPreparedResult := &message.PreparedResult{
-						PreparedQueryId: []byte(fmt.Sprint(InterceptedIdPrefix, i)),
-					}
-					psCache.StoreIntercepted(interceptedPreparedResult, dummyPrepareRequestInfo)
+					psCache.StorePreparedOnBoth(originPreparedResult, targetPreparedResult, createDummyPrepareRequestInfo(fmt.Sprintf("query_%d", i)))
 				}
 
 				// access the specified elements
 				for _, elementSuffix := range test.elementSuffixesToAccess {
 					// access the specified elements to make them recently used
-					foundInOriginMap := checkIfElementIsInOriginMap(psCache, elementSuffix)
+					originId := []byte(fmt.Sprint(OriginIdPrefix, elementSuffix))
+					targetId := []byte(fmt.Sprint(TargetIdPrefix, elementSuffix))
+					_, foundInOriginMap := psCache.GetByOriginPreparedId(originId)
 					require.True(tt, foundInOriginMap, "element could not be found in origin map", elementSuffix)
-					foundInTargetMap := checkIfElementIsInTargetMap(psCache, elementSuffix)
+					_, foundInTargetMap := psCache.GetByTargetPreparedId(targetId)
 					require.True(tt, foundInTargetMap, "element could not be found in target map", elementSuffix)
-					foundInInterceptedMap := checkIfElementIsInInterceptedMap(psCache, elementSuffix)
-					require.True(tt, foundInInterceptedMap, "element could not be found in intercepted map", elementSuffix)
 				}
 
 				// add more elements
@@ -139,27 +128,19 @@ func TestPreparedStatementCache_StoreIntoAllCacheMaps(t *testing.T) {
 					targetPreparedResult := &message.PreparedResult{
 						PreparedQueryId: []byte(fmt.Sprint(TargetIdPrefix, i)),
 					}
-					psCache.Store(originPreparedResult, targetPreparedResult, dummyPrepareRequestInfo)
-
-					interceptedPreparedResult := &message.PreparedResult{
-						PreparedQueryId: []byte(fmt.Sprint(InterceptedIdPrefix, i)),
-					}
-					psCache.StoreIntercepted(interceptedPreparedResult, dummyPrepareRequestInfo)
+					psCache.StorePreparedOnBoth(originPreparedResult, targetPreparedResult, createDummyPrepareRequestInfo(fmt.Sprintf("query_%d", i)))
 				}
 			}
 
-			require.Equal(tt, test.expectedCacheMapSize, psCache.cache.Len())
-			require.Equal(tt, test.expectedCacheMapSize, len(psCache.index))
-			require.Equal(tt, test.expectedCacheMapSize, psCache.interceptedCache.Len())
-			require.Equal(tt, float64(test.expectedCacheMapSize*2), psCache.GetPreparedStatementCacheSize())
+			require.Equal(tt, test.expectedCacheMapSize, len(psCache.indexOrigin))
+			require.Equal(tt, test.expectedCacheMapSize, len(psCache.indexTarget))
+			require.Equal(tt, float64(test.expectedCacheMapSize), psCache.GetPreparedStatementCacheSize())
 
 			for _, elementSuffix := range test.expectedElementSuffixesInCache {
 				foundInOriginMap := checkIfElementIsInOriginMap(psCache, elementSuffix)
 				require.True(tt, foundInOriginMap, "element could not be found in origin map", elementSuffix)
 				foundInTargetMap := checkIfElementIsInTargetMap(psCache, elementSuffix)
 				require.True(tt, foundInTargetMap, "element could not be found in target map", elementSuffix)
-				foundInInterceptedMap := checkIfElementIsInInterceptedMap(psCache, elementSuffix)
-				require.True(tt, foundInInterceptedMap, "element could not be found in intercepted map", elementSuffix)
 			}
 
 		})
@@ -167,25 +148,22 @@ func TestPreparedStatementCache_StoreIntoAllCacheMaps(t *testing.T) {
 
 }
 
+func createDummyPrepareRequestInfo(query string) *PrepareRequestInfo {
+	return NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), false, []*term{}, false, "", query, "")
+}
+
 func checkIfElementIsInOriginMap(psCache *PreparedStatementCache, elementSuffix int) bool {
 	originId := fmt.Sprint(OriginIdPrefix, elementSuffix)
 	// not using psCache.Get, which is tested separately
-	_, foundOriginId := psCache.cache.Get(originId)
+	_, foundOriginId := psCache.indexOrigin[originId]
 	return foundOriginId
 }
 
 func checkIfElementIsInTargetMap(psCache *PreparedStatementCache, elementSuffix int) bool {
 	targetId := fmt.Sprint(TargetIdPrefix, elementSuffix)
 	// not using psCache.GetByTargetPreparedId, which is tested separately
-	_, foundTargetId := psCache.index[targetId]
+	_, foundTargetId := psCache.indexTarget[targetId]
 	return foundTargetId
-}
-
-func checkIfElementIsInInterceptedMap(psCache *PreparedStatementCache, elementSuffix int) bool {
-	interceptedId := fmt.Sprint(InterceptedIdPrefix, elementSuffix)
-	// not using psCache.Get, which is tested separately
-	_, foundInterceptedId := psCache.interceptedCache.Get(interceptedId)
-	return foundInterceptedId
 }
 
 /*
@@ -202,19 +180,19 @@ func TestPreparedStatementCache_GetFromCache(t *testing.T) {
 		cacheMapType CacheMapType
 	}{
 		{
-			name:         "Add to origin cache map, found by Get",
+			name:         "Add to origin cache map, found by GetByOriginPreparedId",
 			elementId:    "someOriginId",
 			cacheMapType: CacheMapTypeOrigin,
 		},
 		{
-			name:         "Add to target cache map, found by GetByTargetId",
+			name:         "Add to target cache map, found by GetByTargetPreparedId",
 			elementId:    "someTargetId",
 			cacheMapType: CacheMapTypeTarget,
 		},
 		{
-			name:         "Add to intercepted cache map, found by Get",
+			name:         "Add to intercepted cache map, found by GetByClientPreparedId",
 			elementId:    "someInterceptedId",
-			cacheMapType: CacheMapTypeTarget,
+			cacheMapType: CacheMapTypeIntercepted,
 		},
 		{
 			name:         "Not added, not found",
@@ -226,45 +204,60 @@ func TestPreparedStatementCache_GetFromCache(t *testing.T) {
 	dummyPreparedResult := &message.PreparedResult{
 		PreparedQueryId: []byte("dummy"),
 	}
-	dummyPreparedData := NewPreparedData(dummyPreparedResult, dummyPreparedResult, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), []*term{}, false, "", ""))
+	dummyPrepareRequestInfo := NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), false, []*term{}, false, "", "dummyQuery", "")
+	dummyPreparedEntry := NewPreparedEntry(
+		md5.Sum([]byte("dummyQuery")),
+		dummyPrepareRequestInfo,
+		NewPreparedData(dummyPreparedResult, dummyPreparedResult),
+	)
 
 	for _, test := range tests {
 		t.Run(test.name, func(tt *testing.T) {
 			psCache, err := NewPreparedStatementCache(MaxPSCacheSizeForTests)
 			require.Nil(tt, err, "Error creating the PSCache", err)
 
+			clientPreparedId := md5.Sum([]byte(test.elementId))
+
 			switch test.cacheMapType {
 			case CacheMapTypeOrigin:
-				psCache.cache.Add(test.elementId, dummyPreparedData)
+				psCache.indexOrigin[test.elementId] = clientPreparedId
+				psCache.cache.Add(clientPreparedId, dummyPreparedEntry)
 
-				_, foundByGet := psCache.Get([]byte(test.elementId))
-				require.True(tt, foundByGet)
+				_, foundByOrigin := psCache.GetByOriginPreparedId([]byte(test.elementId))
+				require.True(tt, foundByOrigin)
 
-				_, foundByGetByTargetPreparedId := psCache.GetByTargetPreparedId([]byte(test.elementId))
-				require.False(tt, foundByGetByTargetPreparedId)
+				_, foundByTarget := psCache.GetByTargetPreparedId([]byte(test.elementId))
+				require.False(tt, foundByTarget)
 			case CacheMapTypeTarget:
-				psCache.index[test.elementId] = "origin_" + test.elementId
-				psCache.cache.Add("origin_"+test.elementId, dummyPreparedData)
+				psCache.indexTarget[test.elementId] = clientPreparedId
+				psCache.cache.Add(clientPreparedId, dummyPreparedEntry)
 
-				_, foundByGet := psCache.Get([]byte(test.elementId))
-				require.False(tt, foundByGet)
+				_, foundByOrigin := psCache.GetByOriginPreparedId([]byte(test.elementId))
+				require.False(tt, foundByOrigin)
 
-				_, foundByGetByTargetPreparedId := psCache.GetByTargetPreparedId([]byte(test.elementId))
-				require.True(tt, foundByGetByTargetPreparedId)
+				_, foundByTarget := psCache.GetByTargetPreparedId([]byte(test.elementId))
+				require.True(tt, foundByTarget)
 			case CacheMapTypeIntercepted:
-				psCache.interceptedCache.Add(test.elementId, dummyPreparedData)
+				interceptedEntry := NewInterceptedPreparedEntry(clientPreparedId, dummyPrepareRequestInfo)
+				psCache.cache.Add(clientPreparedId, interceptedEntry)
 
-				_, foundByGet := psCache.Get([]byte(test.elementId))
-				require.True(tt, foundByGet)
+				_, foundByClient := psCache.GetByClientPreparedId(clientPreparedId)
+				require.True(tt, foundByClient)
 
-				_, foundByGetByTargetPreparedId := psCache.GetByTargetPreparedId([]byte(test.elementId))
-				require.False(tt, foundByGetByTargetPreparedId)
+				_, foundByOrigin := psCache.GetByOriginPreparedId([]byte(test.elementId))
+				require.False(tt, foundByOrigin)
+
+				_, foundByTarget := psCache.GetByTargetPreparedId([]byte(test.elementId))
+				require.False(tt, foundByTarget)
 			case CacheMapTypeNone:
-				_, foundByGet := psCache.Get([]byte(test.elementId))
+				_, foundByGet := psCache.GetByClientPreparedId(clientPreparedId)
 				require.False(tt, foundByGet)
 
-				_, foundByGetByTargetPreparedId := psCache.GetByTargetPreparedId([]byte(test.elementId))
-				require.False(tt, foundByGetByTargetPreparedId)
+				_, foundByOrigin := psCache.GetByOriginPreparedId([]byte(test.elementId))
+				require.False(tt, foundByOrigin)
+
+				_, foundByTarget := psCache.GetByTargetPreparedId([]byte(test.elementId))
+				require.False(tt, foundByTarget)
 			default:
 				t.Fatal("Unknown or missing cache map type")
 			}
