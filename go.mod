@@ -16,6 +16,8 @@ require (
 	github.com/sirupsen/logrus v1.6.0
 	github.com/stretchr/testify v1.8.0
 	gopkg.in/yaml.v3 v3.0.1
+	golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2
+	golang.org/x/term v0.22.0
 )
 
 require (
@@ -33,6 +35,6 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/common v0.7.0 // indirect
 	github.com/prometheus/procfs v0.0.8 // indirect
-	golang.org/x/sys v0.3.0 // indirect
+	golang.org/x/sys v0.22.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 )
