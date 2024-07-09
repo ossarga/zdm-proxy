@@ -19,6 +19,7 @@ import (
 
 	"github.com/datastax/zdm-proxy/proxy/pkg/common"
 	"github.com/datastax/zdm-proxy/proxy/pkg/config"
+	"github.com/datastax/zdm-proxy/proxy/pkg/cryptography"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics/noopmetrics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics/prommetrics"
@@ -27,6 +28,7 @@ import (
 type ZdmProxy struct {
 	Conf           *config.Config
 	TopologyConfig *common.TopologyConfig
+	KeyVault       *cryptography.KeyVault
 
 	originConnectionConfig ConnectionConfig
 	targetConnectionConfig ConnectionConfig
@@ -127,6 +129,17 @@ func (p *ZdmProxy) Start(ctx context.Context) error {
 
 	if err != nil {
 		return fmt.Errorf("could not initialize proxy TLS configuration: %w", err)
+	}
+
+	p.lock.Lock()
+	keyFilePath, err := p.Conf.ParseEncryptionKeyPath()
+	if err == nil && keyFilePath != "" {
+		p.KeyVault, err = cryptography.NewKeyVault(keyFilePath)
+	}
+	p.lock.Unlock()
+
+	if err != nil {
+		return fmt.Errorf("could not initialize encryption key vault: %w", err)
 	}
 
 	var serverSideTlsConfig *tls.Config
@@ -257,9 +270,14 @@ func (p *ZdmProxy) initializeControlConnections(ctx context.Context) error {
 	p.targetConnectionConfig = targetConnectionConfig
 	p.lock.Unlock()
 
+	originPassword, err := p.Conf.GetOriginPassword(p.KeyVault)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt origin password: %w", err)
+	}
+
 	originControlConn := NewControlConn(
 		p.controlConnShutdownCtx, p.Conf.OriginPort, p.originConnectionConfig,
-		p.Conf.OriginUsername, p.Conf.OriginPassword, p.Conf, topologyConfig, p.proxyRand, p.metricHandler)
+		p.Conf.OriginUsername, originPassword, p.Conf, topologyConfig, p.proxyRand, p.metricHandler)
 
 	if err := originControlConn.Start(p.controlConnShutdownWg, ctx); err != nil {
 		return fmt.Errorf("failed to initialize origin control connection: %w", err)
@@ -269,9 +287,14 @@ func (p *ZdmProxy) initializeControlConnections(ctx context.Context) error {
 	p.originControlConn = originControlConn
 	p.lock.Unlock()
 
+	targetPassword, err := p.Conf.GetTargetPassword(p.KeyVault)
+	if err != nil {
+		return fmt.Errorf("failed to decrypt target password: %w", err)
+	}
+
 	targetControlConn := NewControlConn(
 		p.controlConnShutdownCtx, p.Conf.TargetPort, p.targetConnectionConfig,
-		p.Conf.TargetUsername, p.Conf.TargetPassword, p.Conf, topologyConfig, p.proxyRand, p.metricHandler)
+		p.Conf.TargetUsername, targetPassword, p.Conf, topologyConfig, p.proxyRand, p.metricHandler)
 
 	if err := targetControlConn.Start(p.controlConnShutdownWg, ctx); err != nil {
 		return fmt.Errorf("failed to initialize target control connection: %w", err)
@@ -560,6 +583,17 @@ func (p *ZdmProxy) handleNewConnection(clientConn net.Conn) {
 		}
 	}
 
+	targetPassword, err := p.Conf.GetTargetPassword(p.KeyVault)
+	if err != nil {
+		errFunc(err)
+		return
+	}
+	originPassword, err := p.Conf.GetOriginPassword(p.KeyVault)
+	if err != nil {
+		errFunc(err)
+		return
+	}
+
 	originCassandraConnInfo := NewClusterConnectionInfo(p.originConnectionConfig, originEndpoint, true)
 	targetCassandraConnInfo := NewClusterConnectionInfo(p.targetConnectionConfig, targetEndpoint, false)
 	clientHandler, err := NewClientHandler(
@@ -572,9 +606,9 @@ func (p *ZdmProxy) handleNewConnection(clientConn net.Conn) {
 		p.blockedProtoVersions,
 		p.TopologyConfig,
 		p.Conf.TargetUsername,
-		p.Conf.TargetPassword,
+		targetPassword,
 		p.Conf.OriginUsername,
-		p.Conf.OriginPassword,
+		originPassword,
 		p.PreparedStatementCache,
 		p.metricHandler,
 		p.globalClientHandlersWg,
