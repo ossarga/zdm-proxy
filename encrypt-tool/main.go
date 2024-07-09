@@ -71,6 +71,8 @@ var cipherAlgorithms = map[string]CipherAlgorithm{
 	},
 }
 
+const EncryptToolVersionString = "1.0"
+
 // BlowfishNewCipherWrapper
 //
 //	Need to have a wrapper function for the Blowfish cipher as it returns a Cipher object which needs to be cast to a
@@ -116,6 +118,8 @@ func main() {
 }
 
 func usage() {
+	fmt.Println("Encrypt Tool Version: ", EncryptToolVersionString)
+	fmt.Println()
 	fmt.Println("Usage: ", os.Args[0], " [createkey <algorithm> <length> <keypath> | encryptvalue <keypath> | help]")
 	fmt.Println()
 	fmt.Println("Supported algorithms:")
