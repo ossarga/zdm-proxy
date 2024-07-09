@@ -2,9 +2,11 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/datastax/go-cassandra-native-protocol/primitive"
 	"github.com/datastax/zdm-proxy/proxy/pkg/common"
+	"github.com/datastax/zdm-proxy/proxy/pkg/cryptography"
 	"github.com/kelseyhightower/envconfig"
 	def "github.com/mcuadros/go-defaults"
 	log "github.com/sirupsen/logrus"
@@ -26,6 +28,7 @@ type Config struct {
 	AsyncHandshakeTimeoutMs       int    `default:"4000" split_words:"true" yaml:"async_handshake_timeout_ms"`
 	LogLevel                      string `default:"INFO" split_words:"true" yaml:"log_level"`
 	ControlConnMaxProtocolVersion string `default:"DseV2" split_words:"true" yaml:"control_conn_max_protocol_version"` // Numeric Cassandra OSS protocol version or DseV1 / DseV2
+	EncryptionKeyPath             string `split_words:"true" yaml:"encryption_key_path"`
 
 	// Proxy Topology (also known as system.peers "virtualization") bucket
 
@@ -151,6 +154,31 @@ func (c *Config) loadFromFile(configFile string) error {
 		return fmt.Errorf("could not parse yaml file %v: %w", configFile, err)
 	}
 	return nil
+}
+
+func (c *Config) GetOriginPassword(keyVault *cryptography.KeyVault) (string, error) {
+	if keyVault != nil && c.OriginPassword != "" {
+		log.Debugf("Decrypting origin password")
+		decryptedPassword, err := keyVault.Decrypt(c.OriginPassword)
+		if err != nil {
+			return "", fmt.Errorf("could not decrypt origin password: %w", err)
+		}
+		return decryptedPassword, nil
+	}
+	return c.OriginPassword, nil
+}
+
+func (c *Config) GetTargetPassword(keyVault *cryptography.KeyVault) (string, error) {
+	if keyVault != nil && c.TargetPassword != "" {
+		log.Debugf("Decrypting target password")
+		decryptedPassword, err := keyVault.Decrypt(c.TargetPassword)
+		if err != nil {
+			return "", fmt.Errorf("could not decrypt target password: %w", err)
+		}
+		return decryptedPassword, nil
+	}
+
+	return c.TargetPassword, nil
 }
 
 // ParseEnvVars fills out the fields of the Config struct according to envconfig rules
@@ -282,6 +310,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("could not parse target buckets: %v", err)
 	}
 
+	_, err = c.ParseEncryptionKeyPath()
+	if err != nil {
+		return err
+	}
+
 	_, err = c.ParseTopologyConfig()
 	if err != nil {
 		return err
@@ -323,6 +356,21 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c *Config) ParseEncryptionKeyPath() (string, error) {
+	if isDefined(c.EncryptionKeyPath) {
+		_, err := os.Stat(c.EncryptionKeyPath)
+
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("unable to find encryption key: %v", c.EncryptionKeyPath)
+			} else {
+				return "", fmt.Errorf("unable to access encryption key: %v", c.EncryptionKeyPath)
+			}
+		}
+	}
+	return c.EncryptionKeyPath, nil
 }
 
 const (
