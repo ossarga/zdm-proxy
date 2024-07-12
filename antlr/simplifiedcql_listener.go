@@ -1,4 +1,4 @@
-// Code generated from antlr/SimplifiedCql.g4 by ANTLR 4.13.1. DO NOT EDIT.
+// Code generated from antlr/SimplifiedCql.g4 by ANTLR 4.13.2. DO NOT EDIT.
 
 package parser // SimplifiedCql
 
@@ -94,6 +94,9 @@ type SimplifiedCqlListener interface {
 
 	// EnterWhereClause is called when entering the whereClause production.
 	EnterWhereClause(c *WhereClauseContext)
+
+	// EnterWhereExpression is called when entering the whereExpression production.
+	EnterWhereExpression(c *WhereExpressionContext)
 
 	// EnterLogicalOperator is called when entering the logicalOperator production.
 	EnterLogicalOperator(c *LogicalOperatorContext)
@@ -301,6 +304,9 @@ type SimplifiedCqlListener interface {
 
 	// ExitWhereClause is called when exiting the whereClause production.
 	ExitWhereClause(c *WhereClauseContext)
+
+	// ExitWhereExpression is called when exiting the whereExpression production.
+	ExitWhereExpression(c *WhereExpressionContext)
 
 	// ExitLogicalOperator is called when exiting the logicalOperator production.
 	ExitLogicalOperator(c *LogicalOperatorContext)

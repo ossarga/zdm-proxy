@@ -190,7 +190,13 @@ condition
 
 // Note: custom index expressions not supported
 whereClause
-    : K_WHERE relation ( logicalOperator relation )*
+    : K_WHERE whereExpression
+    ;
+
+whereExpression
+    : relation
+    | '(' whereExpression ')'
+    | whereExpression logicalOperator whereExpression
     ;
 
 logicalOperator
