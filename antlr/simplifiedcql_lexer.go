@@ -1,4 +1,4 @@
-// Code generated from SimplifiedCql.g4 by ANTLR 4.9.3. DO NOT EDIT.
+// Code generated from antlr/SimplifiedCql.g4 by ANTLR 4.9.3. DO NOT EDIT.
 
 package parser
 
