@@ -183,8 +183,13 @@ condition
 
 // Note: custom index expressions not supported
 whereClause
-    : K_WHERE relation ( logicalOperator relation )* ( logicalOperator '(' relation logicalOperator relation ')' )*
-    | K_WHERE '(' relation ( logicalOperator relation )* ')' ( logicalOperator relation )* // (a = 1 OR b = 2) AND c = 3
+    : K_WHERE whereExpression
+    ;
+
+whereExpression
+    : relation
+    | '(' whereExpression ')'
+    | whereExpression logicalOperator whereExpression
     ;
 
 logicalOperator
