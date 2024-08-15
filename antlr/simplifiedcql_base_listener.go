@@ -191,6 +191,12 @@ func (s *BaseSimplifiedCqlListener) EnterWhereClause(ctx *WhereClauseContext) {}
 // ExitWhereClause is called when production whereClause is exited.
 func (s *BaseSimplifiedCqlListener) ExitWhereClause(ctx *WhereClauseContext) {}
 
+// EnterWhereExpression is called when production whereExpression is entered.
+func (s *BaseSimplifiedCqlListener) EnterWhereExpression(ctx *WhereExpressionContext) {}
+
+// ExitWhereExpression is called when production whereExpression is exited.
+func (s *BaseSimplifiedCqlListener) ExitWhereExpression(ctx *WhereExpressionContext) {}
+
 // EnterLogicalOperator is called when production logicalOperator is entered.
 func (s *BaseSimplifiedCqlListener) EnterLogicalOperator(ctx *LogicalOperatorContext) {}
 
