@@ -15,9 +15,9 @@ require (
 	github.com/rs/zerolog v1.20.0
 	github.com/sirupsen/logrus v1.6.0
 	github.com/stretchr/testify v1.8.0
-	gopkg.in/yaml.v3 v3.0.1
 	golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2
 	golang.org/x/term v0.22.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

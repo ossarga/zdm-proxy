@@ -3,39 +3,56 @@
 # $ docker build . -f ./Dockerfile -t zdm-proxy
 ##########
 
-FROM golang:1.19-bullseye AS builder
+FROM golang:1.23-bullseye AS builder
+
+ARG RELEASE_VERSION="0.0.0"
+ARG RELEASE_TYPE="development"
+ARG RELEASE_HASH=""
+
+ARG GOOS="linux"
+ARG GOARCH="amd64"
 
 ENV GO111MODULE=on \
-    CGO_ENABLED=0 \
-    GOOS=linux \
-    GOARCH=amd64
+    CGO_ENABLED=1 \
+    BUILD_VERSION=${RELEASE_VERSION}-${RELEASE_TYPE}-${RELEASE_HASH}-${GOOS}-${GOARCH}
 
 # Move to working directory /build
 WORKDIR /build
 
-COPY go.mod .
-COPY go.sum .
-COPY proxy ./proxy
-COPY antlr ./antlr
-RUN ls
+RUN --mount=type=bind,source=go.mod,target=/build/go.mod \
+    --mount=type=bind,source=go.sum,target=/build/go.sum \
+    go mod download -x
 
 # Build the application
-RUN go build -o main ./proxy
+ENV VERSION_PKG=github.com/datastax/zdm-proxy/proxy/pkg/version
+RUN --mount=type=bind,source=.,target=.,rw \
+    go build  \
+        -ldflags " \
+          -X '${VERSION_PKG}.ReleaseVersion=${RELEASE_VERSION}' \
+          -X '${VERSION_PKG}.ReleaseType=${RELEASE_TYPE}' \
+          -X '${VERSION_PKG}.ReleaseHash=${RELEASE_HASH}' \
+          -X '${VERSION_PKG}.ReleaseOS=${GOOS}' \
+          -X '${VERSION_PKG}.ReleaseArch=${GOARCH}' \
+        "  \
+        -o /bin/zdm-proxy  \
+        ./proxy
 
 # Move to /dist directory as the place for resulting binary folder
 WORKDIR /dist
 
 # Copy binary from /build to /dist
-RUN cp /build/main .
+RUN cp /bin/zdm-proxy zdm-proxy-v${BUILD_VERSION}
+
+ENTRYPOINT ["tail", "-f", "/dev/null"]
 
 # Build a small image
-FROM alpine
+FROM alpine AS server
 
-COPY --from=builder /dist/main /
+COPY --from=builder /bin/zdm-proxy /
 COPY LICENSE /
 
 ENV ZDM_PROXY_LISTEN_ADDRESS="0.0.0.0"
 ENV ZDM_METRICS_ADDRESS="0.0.0.0"
 
 # Command to run
-ENTRYPOINT ["/main"]
+ENTRYPOINT ["/zdm-proxy"]

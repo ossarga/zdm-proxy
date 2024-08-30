@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"github.com/datastax/go-cassandra-native-protocol/frame"
+	appd "github.com/datastax/zdm-proxy/appdynamics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/config"
 	log "github.com/sirupsen/logrus"
 	"net"
+	"strconv"
 	"sync"
 )
 
@@ -32,6 +34,9 @@ type writeCoalescer struct {
 	writeBufferSizeBytes int
 
 	scheduler *Scheduler
+
+	frameToBtHandle     map[string]appd.BtHandle
+	frameToBtHandleLock *sync.Mutex
 }
 
 func NewWriteCoalescer(
@@ -71,6 +76,8 @@ func NewWriteCoalescer(
 		waitGroup:              &sync.WaitGroup{},
 		writeBufferSizeBytes:   writeBufferSizeBytes,
 		scheduler:              scheduler,
+		frameToBtHandle:        make(map[string]appd.BtHandle),
+		frameToBtHandleLock:    &sync.Mutex{},
 	}
 }
 
@@ -138,6 +145,7 @@ func (recv *writeCoalescer) RunWriteQueueLoop() {
 
 					log.Tracef("[%v] Writing %v on %v", recv.logPrefix, f.Header, connectionAddr)
 					err := writeRawFrame(tempBuffer, connectionAddr, recv.shutdownContext, f)
+					recv.EndFrameBT(f)
 					if err != nil {
 						tempDraining = true
 						handleConnectionError(err, recv.shutdownContext, recv.cancelFunc, recv.logPrefix, "writing", connectionAddr)
@@ -195,6 +203,47 @@ func (recv *writeCoalescer) EnqueueAsync(frame *frame.RawFrame) bool {
 func (recv *writeCoalescer) Close() {
 	close(recv.writeQueue)
 	recv.waitGroup.Wait()
+}
+
+func getFrameBtHandleId(frame *frame.RawFrame) string {
+	return strconv.Itoa(int(frame.Header.StreamId))
+}
+
+func (recv *writeCoalescer) StartFrameBT(frame *frame.RawFrame, name string) {
+	if recv.conf.AppdEnabled {
+		frameBtHandleId := getFrameBtHandleId(frame)
+		recv.frameToBtHandleLock.Lock()
+		log.Tracef("Starting AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
+		recv.frameToBtHandle[frameBtHandleId] = appd.StartBT(name, "")
+		recv.frameToBtHandleLock.Unlock()
+	}
+}
+
+func (recv *writeCoalescer) EndFrameBT(frame *frame.RawFrame) {
+	if recv.conf.AppdEnabled {
+		frameBtHandleId := getFrameBtHandleId(frame)
+		recv.frameToBtHandleLock.Lock()
+		defer recv.frameToBtHandleLock.Unlock()
+		btHandle, ok := recv.frameToBtHandle[frameBtHandleId]
+		if ok {
+			log.Tracef("Ending AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
+			appd.EndBT(btHandle)
+			delete(recv.frameToBtHandle, frameBtHandleId)
+		}
+	}
+}
+
+func (recv *writeCoalescer) AddedDataToFrameBT(frame *frame.RawFrame, key string, value string) {
+	if recv.conf.AppdEnabled {
+		frameBtHandleId := getFrameBtHandleId(frame)
+		recv.frameToBtHandleLock.Lock()
+		defer recv.frameToBtHandleLock.Unlock()
+		btHandle, ok := recv.frameToBtHandle[frameBtHandleId]
+		if ok {
+			log.Tracef("Adding data to AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
+			appd.AddUserDataToBT(btHandle, key, value)
+		}
+	}
 }
 
 type coalescerIterationResult struct {

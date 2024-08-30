@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	appd "github.com/datastax/zdm-proxy/appdynamics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/common"
 	"github.com/datastax/zdm-proxy/proxy/pkg/cryptography"
 	"github.com/kelseyhightower/envconfig"
@@ -12,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -85,6 +87,30 @@ type Config struct {
 	MetricsOriginLatencyBucketsMs    string `default:"1, 4, 7, 10, 25, 40, 60, 80, 100, 150, 250, 500, 1000, 2500, 5000, 10000, 15000" split_words:"true" yaml:"metrics_origin_latency_buckets_ms"`
 	MetricsTargetLatencyBucketsMs    string `default:"1, 4, 7, 10, 25, 40, 60, 80, 100, 150, 250, 500, 1000, 2500, 5000, 10000, 15000" split_words:"true" yaml:"metrics_target_latency_buckets_ms"`
 	MetricsAsyncReadLatencyBucketsMs string `default:"1, 4, 7, 10, 25, 40, 60, 80, 100, 150, 250, 500, 1000, 2500, 5000, 10000, 15000" split_words:"true" yaml:"metrics_async_read_latency_buckets_ms"`
+
+	// AppDynamics bucket
+
+	AppdEnabled                         bool   `default:"false" split_words:"true" yaml:"appd_enabled"`
+	AppdAppName                         string `split_words:"true" yaml:"appd_app_name"`
+	AppdTierName                        string `split_words:"true" yaml:"appd_tier_name"`
+	AppdNodeName                        string `split_words:"true" yaml:"appd_node_name"`
+	AppdInitTimeoutMs                   int    `default:"1000" split_words:"true" yaml:"appd_init_timeout_ms"`
+	AppdControllerHost                  string `split_words:"true" yaml:"appd_controller_host"`
+	AppdControllerPort                  int    `default:"443" split_words:"true" yaml:"appd_controller_port"`
+	AppdControllerUseSsl                bool   `default:"true" split_words:"true" yaml:"appd_controller_use_ssl"`
+	AppdControllerAccount               string `split_words:"true" yaml:"appd_account_name"`
+	AppdControllerAccessKey             string `split_words:"true" yaml:"appd_access_key"`
+	AppdControllerCertificateFile       string `split_words:"true" yaml:"appd_controller_certificate_file"`
+	AppdControllerCertificateDir        string `split_words:"true" yaml:"appd_controller_certificate_dir"`
+	AppdControllerHTTPProxyHost         string `split_words:"true" yaml:"appd_controller_http_proxy_host"`
+	AppdControllerHTTPProxyPort         int    `split_words:"true" yaml:"appd_controller_http_proxy_port"`
+	AppdControllerHTTPProxyUsername     string `split_words:"true" yaml:"appd_controller_http_proxy_username"`
+	AppdControllerHTTPProxyPasswordFile string `split_words:"true" yaml:"appd_controller_http_proxy_password_file"`
+	AppdLoggingBaseDir                  string `split_words:"true" yaml:"appd_logging_base_dir"`
+	AppdLoggingMinimumLevel             string `default:"DEFAULT" split_words:"true" yaml:"appd_logging_minimum_level"`
+	AppdLoggingMaxNumFiles              int    `split_words:"true" yaml:"appd_logging_max_num_files"`
+	AppdLoggingMaxFileSizeBytes         int    `split_words:"true" yaml:"appd_logging_max_file_size_bytes"`
+	AppdHeartbeatIntervalMs             int    `default:"30000" split_words:"true" yaml:"appd_heartbeat_interval_ms"`
 
 	// Heartbeat bucket
 
@@ -308,7 +334,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("could not parse target buckets: %v", err)
 	}
 
-	_, err = c.ParseEncryptionKeyPath()
+	_, err = c.ParsePath(c.EncryptionKeyPath, "encryption key")
 	if err != nil {
 		return err
 	}
@@ -348,22 +374,26 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	_, err = c.ParseAppDynamicsConfig()
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (c *Config) ParseEncryptionKeyPath() (string, error) {
-	if isDefined(c.EncryptionKeyPath) {
-		_, err := os.Stat(c.EncryptionKeyPath)
-
+func (c *Config) ParsePath(path string, description string) (string, error) {
+	if isDefined(path) {
+		_, err := os.Stat(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return "", fmt.Errorf("unable to find encryption key: %v", c.EncryptionKeyPath)
+				return "", fmt.Errorf("unable to find %v: %v", description, path)
 			} else {
-				return "", fmt.Errorf("unable to access encryption key: %v", c.EncryptionKeyPath)
+				return "", fmt.Errorf("unable to access %v: %v", description, path)
 			}
 		}
 	}
-	return c.EncryptionKeyPath, nil
+	return path, nil
 }
 
 const (
@@ -675,6 +705,159 @@ func (c *Config) ParseProxyTlsConfig(displayLogMessages bool) (*common.ProxyTlsC
 	}
 
 	return &common.ProxyTlsConfig{}, fmt.Errorf("incomplete Proxy TLS configuration: when enabling proxy TLS, please specify CA path, Cert path and Key path")
+}
+
+func (c *Config) ParseAppDynamicsConfig() (*appd.Config, error) {
+	if !c.AppdEnabled {
+		return nil, nil
+	}
+
+	var appdConfig appd.Config
+
+	if isDefined(c.AppdAppName) {
+		appdConfig.AppName = c.AppdAppName
+	} else {
+		return nil, fmt.Errorf("AppDynamics application name is required")
+	}
+
+	if isDefined(c.AppdTierName) {
+		appdConfig.TierName = c.AppdTierName
+	} else {
+		return nil, fmt.Errorf("AppDynamics tier name is required")
+	}
+
+	if isDefined(c.AppdNodeName) {
+		appdConfig.NodeName = c.AppdNodeName
+	} else {
+		return nil, fmt.Errorf("AppDynamics node name is required")
+	}
+
+	if c.AppdInitTimeoutMs > 0 {
+		appdConfig.InitTimeoutMs = c.AppdInitTimeoutMs
+	} else {
+		if c.AppdInitTimeoutMs < 0 {
+			log.Warnf("AppDynamics init timeout is a negative number, ignoring and using default value: %v", appdConfig.InitTimeoutMs)
+		} else {
+			log.Infof("using default value of: %v for AppDynamics init timeout", appdConfig.InitTimeoutMs)
+		}
+
+	}
+
+	if isDefined(c.AppdControllerHost) {
+		appdConfig.Controller.Host = c.AppdControllerHost
+	} else {
+		return nil, fmt.Errorf("AppDynamics controller host is required")
+	}
+
+	if c.AppdControllerPort <= 65535 && c.AppdControllerPort > 0 {
+		appdConfig.Controller.Port = uint16(c.AppdControllerPort)
+	} else {
+		if c.AppdControllerPort < 0 {
+			log.Warnf("AppDynamics controller port is a negative number, ignoring and using default value: %v", appdConfig.Controller.Port)
+		} else {
+			log.Infof("using default value of: %v for AppDynamics controller port", appdConfig.Controller.Port)
+		}
+	}
+
+	appdConfig.Controller.UseSSL = c.AppdControllerUseSsl
+
+	if isDefined(c.AppdControllerAccount) {
+		appdConfig.Controller.Account = c.AppdControllerAccount
+	} else {
+		return nil, fmt.Errorf("AppDynamics account name is required")
+	}
+
+	if isDefined(c.AppdControllerAccessKey) {
+		appdConfig.Controller.AccessKey = c.AppdControllerAccessKey
+	} else {
+		return nil, fmt.Errorf("AppDynamics access key is required")
+	}
+
+	var err error
+	appdConfig.Controller.CertificateDir, err = c.ParsePath(c.AppdControllerCertificateDir, "AppDynamics certificate directory")
+	if err == nil {
+		_, err = c.ParsePath(filepath.Join(appdConfig.Controller.CertificateDir, c.AppdControllerCertificateFile), "AppDynamics certificate file")
+		if err == nil {
+			appdConfig.Controller.CertificateFile = c.AppdControllerCertificateFile
+		} else {
+			return nil, err
+		}
+	} else {
+		return nil, err
+	}
+
+	if isNotDefined(c.AppdControllerCertificateFile) {
+		if c.AppdControllerUseSsl {
+			return nil, fmt.Errorf("AppDynamics SSL is enabled but no certificate path was provided")
+		}
+
+		if isDefined(c.AppdControllerCertificateDir) {
+			return nil, fmt.Errorf("AppDynamics certifcate directory was provided, but no certificate file was provided")
+		}
+	}
+
+	if isDefined(c.AppdControllerHTTPProxyHost) {
+		appdConfig.Controller.HTTPProxy.Host = c.AppdControllerHTTPProxyHost
+	}
+
+	if c.AppdControllerHTTPProxyPort <= 65535 && c.AppdControllerHTTPProxyPort > 0 {
+		appdConfig.Controller.HTTPProxy.Port = uint16(c.AppdControllerHTTPProxyPort)
+	} else if c.AppdControllerHTTPProxyPort < 0 {
+		return nil, fmt.Errorf("invalid AppDynamics controller HTTP proxy port. Please use a number between 0 and 65,535")
+	}
+
+	if isDefined(c.AppdControllerHTTPProxyUsername) {
+		appdConfig.Controller.HTTPProxy.Username = c.AppdControllerHTTPProxyUsername
+	}
+
+	appdConfig.Controller.HTTPProxy.PasswordFile, err = c.ParsePath(c.AppdControllerHTTPProxyPasswordFile, "AppDynamics HTTP proxy password file")
+	if err != nil {
+		return nil, err
+	}
+
+	appdConfig.Logging.BaseDir, err = c.ParsePath(c.AppdLoggingBaseDir, "AppDynamics logging base directory")
+	if err != nil {
+		return nil, err
+	}
+
+	if isDefined(c.AppdLoggingMinimumLevel) {
+		appdConfig.Logging.MinimumLevel, err = parseAppDynamicsLogLevel(c.AppdLoggingMinimumLevel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	appdConfig.Logging.MaxNumFiles = uint(c.AppdLoggingMaxNumFiles)
+
+	appdConfig.Logging.MaxFileSizeBytes = uint(c.AppdLoggingMaxFileSizeBytes)
+
+	if c.AppdHeartbeatIntervalMs <= 0 {
+		return nil, fmt.Errorf("invalid AppDynamics heartbeat interval: %v", c.AppdLoggingMinimumLevel)
+	}
+
+	return &appdConfig, nil
+}
+
+func parseAppDynamicsLogLevel(lvl string) (appd.LogLevel, error) {
+	switch strings.ToLower(lvl) {
+	case "default":
+		return appd.APPD_LOG_LEVEL_DEFAULT, nil
+	case "trace":
+		return appd.APPD_LOG_LEVEL_TRACE, nil
+	case "debug":
+		return appd.APPD_LOG_LEVEL_DEBUG, nil
+	case "info":
+		return appd.APPD_LOG_LEVEL_INFO, nil
+	case "warn", "warning":
+		return appd.APPD_LOG_LEVEL_WARN, nil
+	case "error":
+		return appd.APPD_LOG_LEVEL_ERROR, nil
+	case "fatal":
+		return appd.APPD_LOG_LEVEL_FATAL, nil
+	default:
+		return appd.APPD_LOG_LEVEL_DEFAULT, fmt.Errorf("invalid log level, valid log levels are " +
+			"DEFAULT, TRACE, DEBUG, INFO, WARN or WARNING, ERROR, and FATAL")
+	}
 }
 
 func isDefined(propertyValue string) bool {

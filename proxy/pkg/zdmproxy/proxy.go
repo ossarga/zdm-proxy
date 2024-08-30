@@ -5,18 +5,21 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	appd "github.com/datastax/zdm-proxy/appdynamics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/common"
 	"github.com/datastax/zdm-proxy/proxy/pkg/config"
 	"github.com/datastax/zdm-proxy/proxy/pkg/cryptography"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics/noopmetrics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/metrics/prommetrics"
+	"github.com/datastax/zdm-proxy/proxy/pkg/version"
 	"github.com/jpillora/backoff"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	"math/rand"
 	"net"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,7 +81,8 @@ type ZdmProxy struct {
 	clientHandlersShutdownRequestCancelFn context.CancelFunc
 	globalClientHandlersWg                *sync.WaitGroup
 
-	metricHandler *metrics.MetricHandler
+	metricHandler   *metrics.MetricHandler
+	appDHeartbeatWg *sync.WaitGroup
 }
 
 func NewZdmProxy(conf *config.Config) (*ZdmProxy, error) {
@@ -121,13 +125,7 @@ func (p *ZdmProxy) Start(ctx context.Context) error {
 		return fmt.Errorf("could not initialize proxy TLS configuration: %w", err)
 	}
 
-	p.lock.Lock()
-	keyFilePath, err := p.Conf.ParseEncryptionKeyPath()
-	if err == nil && keyFilePath != "" {
-		p.KeyVault, err = cryptography.NewKeyVault(keyFilePath)
-	}
-	p.lock.Unlock()
-
+	err = p.initializeKeyVault()
 	if err != nil {
 		return fmt.Errorf("could not initialize encryption key vault: %w", err)
 	}
@@ -146,6 +144,13 @@ func (p *ZdmProxy) Start(ctx context.Context) error {
 	err = p.initializeMetricHandler()
 	if err != nil {
 		return err
+	}
+
+	if p.Conf.AppdEnabled {
+		err = p.initializeAppDynamics()
+		if err != nil {
+			return err
+		}
 	}
 
 	err = p.initializeControlConnections(ctx)
@@ -186,6 +191,18 @@ func (p *ZdmProxy) Start(ctx context.Context) error {
 
 	log.Infof("Proxy connected and ready to accept queries on %v:%d", p.Conf.ProxyListenAddress, p.Conf.ProxyListenPort)
 	return nil
+}
+
+func (p *ZdmProxy) initializeKeyVault() error {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	keyFilePath, err := p.Conf.ParsePath(p.Conf.EncryptionKeyPath, "encryption key")
+	if err == nil && keyFilePath != "" {
+		p.KeyVault, err = cryptography.NewKeyVault(keyFilePath)
+	}
+
+	return err
 }
 
 func (p *ZdmProxy) initializeControlConnections(ctx context.Context) error {
@@ -325,6 +342,57 @@ func (p *ZdmProxy) initializeMetricHandler() error {
 	return nil
 }
 
+func (p *ZdmProxy) initializeAppDynamics() error {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	appDConfig, err := p.Conf.ParseAppDynamicsConfig()
+	if err != nil {
+		return err
+	}
+
+	log.Tracef("Initializing AppDynamics")
+
+	err = appd.InitSDK(appDConfig)
+	if err != nil {
+		return fmt.Errorf("error initializing the AppDynamics SDK")
+	}
+
+	log.Tracef("Sending startup AppDynamics Business Transaction")
+	btHandle := appd.StartBT("ZDMProxyStartup", "")
+	appd.AddUserDataToBT(btHandle, "ZDMProxyVersion", version.ZdmVersionString())
+	appd.AddUserDataToBT(btHandle, "ZDMProxyTopologyIndex", strconv.Itoa(p.Conf.ProxyTopologyIndex))
+	appd.AddUserDataToBT(btHandle, "ZDMProxyTopologyAddresses", p.Conf.ProxyTopologyAddresses)
+	appd.EndBT(btHandle)
+
+	// Create a goroutine that sends a heartbeat to AppDynamics every interval
+	p.appDHeartbeatWg.Add(1)
+	go func() {
+		defer p.appDHeartbeatWg.Done()
+		ticker := time.NewTicker(time.Duration(p.Conf.AppdHeartbeatIntervalMs) * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				appd.EndBT(appd.StartBT("ZDMProxyHeartbeat", ""))
+			case <-p.controlConnShutdownCtx.Done():
+				return
+			}
+		}
+	}()
+
+	return nil
+}
+
+func (p *ZdmProxy) shutdownAppDynamics() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	appd.EndBT(appd.StartBT("ZDMProxyShutdown", ""))
+	appd.TerminateSDK()
+}
+
 func (p *ZdmProxy) initializeGlobalStructures() error {
 	p.lock = &sync.RWMutex{}
 
@@ -410,6 +478,7 @@ func (p *ZdmProxy) initializeGlobalStructures() error {
 	p.controlConnShutdownWg = &sync.WaitGroup{}
 	p.listenerShutdownWg = &sync.WaitGroup{}
 	p.shutdownClientListenerChan = make(chan bool)
+	p.appDHeartbeatWg = &sync.WaitGroup{}
 
 	p.originBuckets, err = p.Conf.ParseOriginBuckets()
 	if err != nil {
@@ -644,6 +713,11 @@ func (p *ZdmProxy) Shutdown() {
 	p.writeScheduler.Shutdown()
 	p.readScheduler.Shutdown()
 	p.listenerScheduler.Shutdown()
+
+	if p.Conf.AppdEnabled {
+		log.Debug("Shutting down the AppDynamics SDK...")
+		p.shutdownAppDynamics()
+	}
 
 	p.lock.Lock()
 	if p.metricHandler != nil {
