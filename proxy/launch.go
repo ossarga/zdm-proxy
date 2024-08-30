@@ -6,14 +6,12 @@ import (
     "fmt"
     "github.com/datastax/zdm-proxy/proxy/pkg/config"
     "github.com/datastax/zdm-proxy/proxy/pkg/runner"
+    "github.com/datastax/zdm-proxy/proxy/pkg/version"
     log "github.com/sirupsen/logrus"
     "os"
     "os/signal"
     "syscall"
 )
-
-// TODO: to be managed externally
-const ZdmVersionString = "2.5.2-custom"
 
 var displayVersion = flag.Bool("version", false, "display the ZDM proxy version and exit")
 var configFile = flag.String("config", "", "specify path to ZDM configuration file")
@@ -33,12 +31,12 @@ func runSignalListener(cancelFunc context.CancelFunc) {
 
 func launchProxy(profilingSupported bool) {
     if *displayVersion {
-        fmt.Printf("ZDM proxy version %v\n", ZdmVersionString)
+        fmt.Printf("ZDM proxy version %v\n", version.ZdmVersionString())
         return
     }
 
     // Always record version information (very) early in the log
-    log.Infof("Starting ZDM proxy version %v", ZdmVersionString)
+    log.Infof("Starting ZDM proxy version %v", version.ZdmVersionString())
 
     conf, err := config.New().LoadConfig(*configFile)
 

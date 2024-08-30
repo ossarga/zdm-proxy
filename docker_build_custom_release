@@ -1,0 +1,9 @@
+#!/bin/bash
+
+docker build \
+  --target=builder \
+  --build-arg="RELEASE_VERSION=$(cat VERSION)" \
+  --build-arg="RELEASE_TYPE=custom" \
+  --build-arg="RELEASE_HASH=$(git rev-parse --short HEAD)" \
+  --tag=zdm-proxy:builder \
+  .
