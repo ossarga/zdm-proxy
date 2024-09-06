@@ -82,7 +82,6 @@ type ZdmProxy struct {
 	globalClientHandlersWg                *sync.WaitGroup
 
 	metricHandler   *metrics.MetricHandler
-	appDHeartbeatWg *sync.WaitGroup
 }
 
 func NewZdmProxy(conf *config.Config) (*ZdmProxy, error) {
@@ -365,23 +364,6 @@ func (p *ZdmProxy) initializeAppDynamics() error {
 	appd.AddUserDataToBT(btHandle, "ZDMProxyTopologyAddresses", p.Conf.ProxyTopologyAddresses)
 	appd.EndBT(btHandle)
 
-	// Create a goroutine that sends a heartbeat to AppDynamics every interval
-	p.appDHeartbeatWg.Add(1)
-	go func() {
-		defer p.appDHeartbeatWg.Done()
-		ticker := time.NewTicker(time.Duration(p.Conf.AppdHeartbeatIntervalMs) * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				appd.EndBT(appd.StartBT("ZDMProxyHeartbeat", ""))
-			case <-p.controlConnShutdownCtx.Done():
-				return
-			}
-		}
-	}()
-
 	return nil
 }
 
@@ -478,7 +460,6 @@ func (p *ZdmProxy) initializeGlobalStructures() error {
 	p.controlConnShutdownWg = &sync.WaitGroup{}
 	p.listenerShutdownWg = &sync.WaitGroup{}
 	p.shutdownClientListenerChan = make(chan bool)
-	p.appDHeartbeatWg = &sync.WaitGroup{}
 
 	p.originBuckets, err = p.Conf.ParseOriginBuckets()
 	if err != nil {
