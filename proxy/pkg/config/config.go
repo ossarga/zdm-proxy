@@ -94,6 +94,7 @@ type Config struct {
 	AppdAppName                         string `split_words:"true" yaml:"appd_app_name"`
 	AppdTierName                        string `split_words:"true" yaml:"appd_tier_name"`
 	AppdNodeName                        string `split_words:"true" yaml:"appd_node_name"`
+	AppdIgnoreSystemKeyspaceQueries     bool   `default:"true" split_words:"true" yaml:"appd_ignore_system_keyspace_queries"`
 	AppdInitTimeoutMs                   int    `default:"1000" split_words:"true" yaml:"appd_init_timeout_ms"`
 	AppdControllerHost                  string `split_words:"true" yaml:"appd_controller_host"`
 	AppdControllerPort                  int    `default:"443" split_words:"true" yaml:"appd_controller_port"`

@@ -3,12 +3,15 @@ package zdmproxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/datastax/go-cassandra-native-protocol/frame"
+	"github.com/datastax/go-cassandra-native-protocol/message"
 	appd "github.com/datastax/zdm-proxy/appdynamics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/config"
 	log "github.com/sirupsen/logrus"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -205,6 +208,41 @@ func (recv *writeCoalescer) Close() {
 	recv.waitGroup.Wait()
 }
 
+func (recv *writeCoalescer) isSystemStatement(frame *frame.RawFrame) (bool, string, error) {
+
+	var currentKeyspace string
+	var requestType string
+	frameContext := NewFrameDecodeContext(frame)
+	var timeUuidGenerator TimeUuidGenerator
+
+	decodedFrame, err := frameContext.GetOrDecodeFrame()
+	if err != nil {
+		return false, "", fmt.Errorf("failed to decode frame: %w", err)
+	}
+
+	switch typedMsg := decodedFrame.Body.Message.(type) {
+	case *message.Query:
+		currentKeyspace = strings.ToLower(typedMsg.Options.Keyspace)
+		requestType = "QUERY"
+	case *message.Prepare:
+		currentKeyspace = strings.ToLower(typedMsg.Keyspace)
+		requestType = "PREPARE"
+	case *message.Batch:
+		currentKeyspace = strings.ToLower(typedMsg.Keyspace)
+		requestType = "BATCH"
+	default:
+		currentKeyspace = ""
+		requestType = "unknown"
+	}
+
+	stmtQueryData, err := frameContext.GetOrInspectStatement(currentKeyspace, timeUuidGenerator)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to inspect %s frame: %w", requestType, err)
+	}
+
+	return isSystemQuery(stmtQueryData.queryData), requestType, nil
+}
+
 func getFrameBtHandleId(frame *frame.RawFrame) string {
 	return strconv.Itoa(int(frame.Header.StreamId))
 }
@@ -212,9 +250,36 @@ func getFrameBtHandleId(frame *frame.RawFrame) string {
 func (recv *writeCoalescer) StartFrameBT(frame *frame.RawFrame, name string) {
 	if recv.conf.AppdEnabled {
 		frameBtHandleId := getFrameBtHandleId(frame)
+		frameType := ""
+
+		if recv.conf.AppdIgnoreSystemKeyspaceQueries {
+			var systemKeyspace bool
+			var err error
+			systemKeyspace, frameType, err = recv.isSystemStatement(frame)
+
+			if err != nil {
+				log.Errorf("[%v] Error determining if frame is a system statement: %v", recv.logPrefix, err)
+				return
+			}
+
+			if frameType == "unknown" {
+				log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it is not a query, prepare, or batch frame.", recv.logPrefix, frameBtHandleId)
+				return
+			}
+
+			if systemKeyspace {
+				log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it contains a system keyspace query.", recv.logPrefix, frameBtHandleId)
+				return
+			}
+		}
+
 		recv.frameToBtHandleLock.Lock()
-		log.Tracef("Starting AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
-		recv.frameToBtHandle[frameBtHandleId] = appd.StartBT(name, "")
+		log.Tracef("[%v] Starting AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
+		btHandle := appd.StartBT(name, "")
+		if frameType != "" {
+			appd.AddUserDataToBT(btHandle, "RequestType", frameType)
+		}
+		recv.frameToBtHandle[frameBtHandleId] = btHandle
 		recv.frameToBtHandleLock.Unlock()
 	}
 }
@@ -226,7 +291,7 @@ func (recv *writeCoalescer) EndFrameBT(frame *frame.RawFrame) {
 		defer recv.frameToBtHandleLock.Unlock()
 		btHandle, ok := recv.frameToBtHandle[frameBtHandleId]
 		if ok {
-			log.Tracef("Ending AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
+			log.Tracef("[%s] Ending AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
 			appd.EndBT(btHandle)
 			delete(recv.frameToBtHandle, frameBtHandleId)
 		}
@@ -240,7 +305,7 @@ func (recv *writeCoalescer) AddedDataToFrameBT(frame *frame.RawFrame, key string
 		defer recv.frameToBtHandleLock.Unlock()
 		btHandle, ok := recv.frameToBtHandle[frameBtHandleId]
 		if ok {
-			log.Tracef("Adding data to AppDynamics Business Transaction for frame ref: %s", frameBtHandleId)
+			log.Tracef("[%s] Adding data to AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
 			appd.AddUserDataToBT(btHandle, key, value)
 		}
 	}
