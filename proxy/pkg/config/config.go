@@ -107,10 +107,9 @@ type Config struct {
 	AppdControllerHTTPProxyUsername     string `split_words:"true" yaml:"appd_controller_http_proxy_username"`
 	AppdControllerHTTPProxyPasswordFile string `split_words:"true" yaml:"appd_controller_http_proxy_password_file"`
 	AppdLoggingBaseDir                  string `split_words:"true" yaml:"appd_logging_base_dir"`
-	AppdLoggingMinimumLevel             string `default:"DEFAULT" split_words:"true" yaml:"appd_logging_minimum_level"`
+	AppdLoggingMinimumLevel             string `default:"INFO" split_words:"true" yaml:"appd_logging_minimum_level"`
 	AppdLoggingMaxNumFiles              int    `split_words:"true" yaml:"appd_logging_max_num_files"`
 	AppdLoggingMaxFileSizeBytes         int    `split_words:"true" yaml:"appd_logging_max_file_size_bytes"`
-	AppdHeartbeatIntervalMs             int    `default:"30000" split_words:"true" yaml:"appd_heartbeat_interval_ms"`
 
 	// Heartbeat bucket
 
@@ -831,17 +830,11 @@ func (c *Config) ParseAppDynamicsConfig() (*appd.Config, error) {
 
 	appdConfig.Logging.MaxFileSizeBytes = uint(c.AppdLoggingMaxFileSizeBytes)
 
-	if c.AppdHeartbeatIntervalMs <= 0 {
-		return nil, fmt.Errorf("invalid AppDynamics heartbeat interval: %v", c.AppdLoggingMinimumLevel)
-	}
-
 	return &appdConfig, nil
 }
 
 func parseAppDynamicsLogLevel(lvl string) (appd.LogLevel, error) {
 	switch strings.ToLower(lvl) {
-	case "default":
-		return appd.APPD_LOG_LEVEL_DEFAULT, nil
 	case "trace":
 		return appd.APPD_LOG_LEVEL_TRACE, nil
 	case "debug":
@@ -856,7 +849,7 @@ func parseAppDynamicsLogLevel(lvl string) (appd.LogLevel, error) {
 		return appd.APPD_LOG_LEVEL_FATAL, nil
 	default:
 		return appd.APPD_LOG_LEVEL_DEFAULT, fmt.Errorf("invalid log level, valid log levels are " +
-			"DEFAULT, TRACE, DEBUG, INFO, WARN or WARNING, ERROR, and FATAL")
+			"TRACE, DEBUG, INFO, WARN or WARNING, ERROR, and FATAL")
 	}
 }
 
