@@ -208,39 +208,42 @@ func (recv *writeCoalescer) Close() {
 	recv.waitGroup.Wait()
 }
 
-func (recv *writeCoalescer) isSystemStatement(frame *frame.RawFrame) (bool, string, error) {
-
-	var currentKeyspace string
+func (recv *writeCoalescer) getStatementInfo(frame *frame.RawFrame) (string, string, *statementQueryData, error) {
 	var requestType string
+	currentKeyspace := ""
 	frameContext := NewFrameDecodeContext(frame)
 	var timeUuidGenerator TimeUuidGenerator
 
 	decodedFrame, err := frameContext.GetOrDecodeFrame()
 	if err != nil {
-		return false, "", fmt.Errorf("failed to decode frame: %w", err)
+		return "", "", nil, fmt.Errorf("failed to decode frame: %w", err)
 	}
 
 	switch typedMsg := decodedFrame.Body.Message.(type) {
 	case *message.Query:
+		requestType = "query"
 		currentKeyspace = strings.ToLower(typedMsg.Options.Keyspace)
-		requestType = "QUERY"
 	case *message.Prepare:
+		requestType = "prepare"
 		currentKeyspace = strings.ToLower(typedMsg.Keyspace)
-		requestType = "PREPARE"
 	case *message.Batch:
+		requestType = "batch"
 		currentKeyspace = strings.ToLower(typedMsg.Keyspace)
-		requestType = "BATCH"
 	default:
-		currentKeyspace = ""
 		requestType = "unknown"
+		currentKeyspace = ""
 	}
 
 	stmtQueryData, err := frameContext.GetOrInspectStatement(currentKeyspace, timeUuidGenerator)
 	if err != nil {
-		return false, "", fmt.Errorf("failed to inspect %s frame: %w", requestType, err)
+		return "", "", nil, fmt.Errorf("failed to inspect %s frame: %w", requestType, err)
 	}
 
-	return isSystemQuery(stmtQueryData.queryData), requestType, nil
+	if currentKeyspace == "" {
+		currentKeyspace = stmtQueryData.queryData.getApplicableKeyspace()
+	}
+
+	return requestType, currentKeyspace, stmtQueryData, nil
 }
 
 func getFrameBtHandleId(frame *frame.RawFrame) string {
@@ -250,35 +253,32 @@ func getFrameBtHandleId(frame *frame.RawFrame) string {
 func (recv *writeCoalescer) StartFrameBT(frame *frame.RawFrame, name string) {
 	if recv.conf.AppdEnabled {
 		frameBtHandleId := getFrameBtHandleId(frame)
-		frameType := ""
+		requestType, currentKeyspace, statementInfo, err := recv.getStatementInfo(frame)
 
-		if recv.conf.AppdIgnoreSystemKeyspaceQueries {
-			var systemKeyspace bool
-			var err error
-			systemKeyspace, frameType, err = recv.isSystemStatement(frame)
+		if err != nil {
+			log.Errorf("[%v] Error retrieving frame information: %v", recv.logPrefix, err)
+			return
+		}
 
-			if err != nil {
-				log.Errorf("[%v] Error determining if frame is a system statement: %v", recv.logPrefix, err)
-				return
-			}
+		if requestType == "unknown" {
+			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it is not a query, prepare, or batch request.", recv.logPrefix, frameBtHandleId)
+			return
+		}
 
-			if frameType == "unknown" {
-				log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it is not a query, prepare, or batch frame.", recv.logPrefix, frameBtHandleId)
-				return
-			}
+		if currentKeyspace == "" {
+			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as the keyspace is unknown.", recv.logPrefix, frameBtHandleId)
+			return
+		}
 
-			if systemKeyspace {
-				log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it contains a system keyspace query.", recv.logPrefix, frameBtHandleId)
-				return
-			}
+		if recv.conf.AppdIgnoreSystemKeyspaceQueries && isSystemQuery(statementInfo.queryData) {
+			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it contains a system keyspace query.", recv.logPrefix, frameBtHandleId)
+			return
 		}
 
 		recv.frameToBtHandleLock.Lock()
-		log.Tracef("[%v] Starting AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
+		log.Tracef("[%v] Starting AppDynamics Business Transaction for frame id: %s; requestType: %s; currentKeyspace: %s", recv.logPrefix, frameBtHandleId, requestType, currentKeyspace)
 		btHandle := appd.StartBT(name, "")
-		if frameType != "" {
-			appd.AddUserDataToBT(btHandle, "RequestType", frameType)
-		}
+		appd.AddUserDataToBT(btHandle, "RequestType", requestType)
 		recv.frameToBtHandle[frameBtHandleId] = btHandle
 		recv.frameToBtHandleLock.Unlock()
 	}
