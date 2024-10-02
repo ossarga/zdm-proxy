@@ -1,9 +1,36 @@
 #!/bin/bash
 
+set -e
+
 docker build \
   --target=builder \
   --build-arg="RELEASE_VERSION=$(cat VERSION)" \
   --build-arg="RELEASE_TYPE=custom" \
   --build-arg="RELEASE_HASH=$(git rev-parse --short HEAD)" \
   --tag=zdm-proxy:builder \
-  .
+  --no-cache \
+  --progress=plain \
+  . \
+  2>&1 | tee build.log
+
+build_result="$?"
+echo "Build result: $build_result"
+[ $build_result = 0 ] || exit $build_result
+
+zdm_proxy_build_release=$(grep "\[builder 6\/6\] RUN cp" build.log | rev | cut -d' ' -f1 | rev)
+echo "Build release: $zdm_proxy_build_release"
+zdm_proxy_build_container="${zdm_proxy_build_release}-build-$(date +%s)"
+echo "Build container: $zdm_proxy_build_container"
+
+docker run --name "${zdm_proxy_build_container}" zdm-proxy:builder &
+while true
+do
+  sleep 5
+  docker_ps_info=$(docker ps -a | grep "${zdm_proxy_build_container}" | grep "Up" || true)
+  [ -z "$docker_ps_info" ] || break
+done
+
+docker cp "${zdm_proxy_build_container}":/dist/"${zdm_proxy_build_release}" ./ \
+&& docker stop "${zdm_proxy_build_container}" > /dev/null \
+&& docker rm "${zdm_proxy_build_container}" > /dev/null \
+&& md5 "${zdm_proxy_build_release}"

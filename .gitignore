@@ -19,6 +19,9 @@
 # go
 vendor
 
+# logs
+*.log
+
 # vscode
 __debug_bin
 .vscode
