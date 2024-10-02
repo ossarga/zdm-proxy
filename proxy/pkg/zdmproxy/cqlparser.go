@@ -68,6 +68,7 @@ func buildRequestInfo(
 	stmtsReplacedTerms []*statementReplacedTerms,
 	psCache *PreparedStatementCache,
 	mh *metrics.MetricHandler,
+	cc *ClientConnector,
 	currentKeyspaceName string,
 	primaryCluster common.ClusterType,
 	forwardSystemQueriesToTarget bool,
@@ -82,6 +83,7 @@ func buildRequestInfo(
 		if err != nil {
 			return nil, fmt.Errorf("could not inspect QUERY frame: %w", err)
 		}
+		cc.writeCoalescer.StartFrameBTFromQueryData(f, "ZDMProxyClientRequest", stmtQueryData)
 		return getRequestInfoFromQueryInfo(
 			frameContext.GetRawFrame(), primaryCluster,
 			forwardSystemQueriesToTarget, virtualizationEnabled, stmtQueryData.queryData), nil
@@ -107,6 +109,7 @@ func buildRequestInfo(
 		} else if len(stmtsReplacedTerms) == 1 {
 			replacedTerms = stmtsReplacedTerms[0].replacedTerms
 		}
+		cc.writeCoalescer.StartFrameBTFromQueryData(f, "ZDMProxyClientRequest", stmtQueryData)
 		return NewPrepareRequestInfo(baseRequestInfo, stmtQueryData.queryData.isFullyQualified(), replacedTerms,
 			stmtQueryData.queryData.hasPositionalBindMarkers(), currentKeyspaceName, prepareMsg.Query, prepareMsg.Keyspace), nil
 	case primitive.OpCodeBatch:
@@ -130,6 +133,7 @@ func buildRequestInfo(
 				}
 			}
 		}
+		cc.writeCoalescer.StartFrameBTFromQueryData(f, "ZDMProxyClientRequest", nil)
 		return NewBatchRequestInfo(preparedDataByStmtIdxMap), nil
 	case primitive.OpCodeExecute:
 		decodedFrame, err := frameContext.GetOrDecodeFrame()

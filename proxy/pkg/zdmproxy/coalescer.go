@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/datastax/go-cassandra-native-protocol/frame"
 	"github.com/datastax/go-cassandra-native-protocol/message"
+	"github.com/datastax/go-cassandra-native-protocol/primitive"
 	appd "github.com/datastax/zdm-proxy/appdynamics"
 	"github.com/datastax/zdm-proxy/proxy/pkg/config"
 	log "github.com/sirupsen/logrus"
@@ -250,37 +251,29 @@ func getFrameBtHandleId(frame *frame.RawFrame) string {
 	return strconv.Itoa(int(frame.Header.StreamId))
 }
 
-func (recv *writeCoalescer) StartFrameBT(frame *frame.RawFrame, name string) {
+func (recv *writeCoalescer) StartFrameBTFromQueryData(frame *frame.RawFrame, name string, stmtQueryData *statementQueryData) {
 	if recv.conf.AppdEnabled {
 		frameBtHandleId := getFrameBtHandleId(frame)
-		requestType, currentKeyspace, statementInfo, err := recv.getStatementInfo(frame)
 
-		if err != nil {
-			log.Errorf("[%v] Error retrieving frame information: %v", recv.logPrefix, err)
-			return
-		}
-
-		if requestType == "unknown" {
-			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it is not a query, prepare, or batch request.", recv.logPrefix, frameBtHandleId)
-			return
-		}
-
-		if currentKeyspace == "" {
-			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as the keyspace is unknown.", recv.logPrefix, frameBtHandleId)
-			return
-		}
-
-		if recv.conf.AppdIgnoreSystemKeyspaceQueries && isSystemQuery(statementInfo.queryData) {
-			log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it contains a system keyspace query.", recv.logPrefix, frameBtHandleId)
-			return
+		if frame.Header.OpCode != primitive.OpCodeBatch {
+			if frame.Header.OpCode == primitive.OpCodeQuery || frame.Header.OpCode == primitive.OpCodePrepare {
+				// If the query is a system query, we ignore it. Only check query or prepare requests as batch request should never contain system queries.
+				if recv.conf.AppdIgnoreSystemKeyspaceQueries && isSystemQuery(stmtQueryData.queryData) {
+					log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it contains a system keyspace query.", recv.logPrefix, frameBtHandleId)
+					return
+				}
+			} else {
+				log.Tracef("[%v] Ignoring AppDynamics Business Transaction for frame id %s as it is not a query, prepare, or batch operation.", recv.logPrefix, frameBtHandleId)
+				return
+			}
 		}
 
 		recv.frameToBtHandleLock.Lock()
-		log.Tracef("[%v] Starting AppDynamics Business Transaction for frame id: %s; requestType: %s; currentKeyspace: %s", recv.logPrefix, frameBtHandleId, requestType, currentKeyspace)
+		defer recv.frameToBtHandleLock.Unlock()
+		log.Tracef("[%v] Starting AppDynamics Business Transaction for frame id: %s; opType: %s", recv.logPrefix, frameBtHandleId, frame.Header.OpCode.String())
 		btHandle := appd.StartBT(name, "")
-		appd.AddUserDataToBT(btHandle, "RequestType", requestType)
+		appd.AddUserDataToBT(btHandle, "OperationType", frame.Header.OpCode.String())
 		recv.frameToBtHandle[frameBtHandleId] = btHandle
-		recv.frameToBtHandleLock.Unlock()
 	}
 }
 
@@ -294,19 +287,6 @@ func (recv *writeCoalescer) EndFrameBT(frame *frame.RawFrame) {
 			log.Tracef("[%s] Ending AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
 			appd.EndBT(btHandle)
 			delete(recv.frameToBtHandle, frameBtHandleId)
-		}
-	}
-}
-
-func (recv *writeCoalescer) AddedDataToFrameBT(frame *frame.RawFrame, key string, value string) {
-	if recv.conf.AppdEnabled {
-		frameBtHandleId := getFrameBtHandleId(frame)
-		recv.frameToBtHandleLock.Lock()
-		defer recv.frameToBtHandleLock.Unlock()
-		btHandle, ok := recv.frameToBtHandle[frameBtHandleId]
-		if ok {
-			log.Tracef("[%s] Adding data to AppDynamics Business Transaction for frame id %s", recv.logPrefix, frameBtHandleId)
-			appd.AddUserDataToBT(btHandle, key, value)
 		}
 	}
 }
