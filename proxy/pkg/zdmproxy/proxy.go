@@ -350,7 +350,7 @@ func (p *ZdmProxy) initializeAppDynamics() error {
 		return err
 	}
 
-	log.Tracef("Initializing AppDynamics")
+	log.Info("Initializing AppDynamics")
 
 	err = appd.InitSDK(appDConfig)
 	if err != nil {

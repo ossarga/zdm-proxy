@@ -1413,7 +1413,7 @@ func (ch *ClientHandler) forwardRequest(request *frame.RawFrame, customResponseC
 		return err
 	}
 	requestInfo, err := buildRequestInfo(
-		context, replacedTerms, ch.preparedStatementCache, ch.metricHandler, currentKeyspace, ch.primaryCluster,
+		context, replacedTerms, ch.preparedStatementCache, ch.metricHandler, ch.clientConnector, currentKeyspace, ch.primaryCluster,
 		ch.forwardSystemQueriesToTarget, ch.topologyConfig.VirtualizationEnabled, ch.forwardAuthToTarget, ch.timeUuidGenerator)
 	if err != nil {
 		if errVal, ok := err.(*UnpreparedExecuteError); ok {

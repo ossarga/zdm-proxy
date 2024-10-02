@@ -203,7 +203,6 @@ func (cc *ClientConnector) listenForRequests() {
 					cc.sendOverloadedToClient(f)
 					return
 				}
-				cc.writeCoalescer.StartFrameBT(f, "ZDMProxyClientRequest")
 				cc.requestChannel <- f
 				lock.RUnlock()
 				log.Tracef("[%s] Request sent to client connector's request channel: %v", ClientConnectorLogPrefix, f.Header)
