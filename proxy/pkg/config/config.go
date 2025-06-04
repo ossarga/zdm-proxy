@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,11 @@ import (
 	"gopkg.in/yaml.v3"
 	"net"
 	"os"
+	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds the values of environment variables necessary for proper Proxy function.
@@ -29,6 +33,11 @@ type Config struct {
 	LogLevel                      string `default:"INFO" split_words:"true" yaml:"log_level"`
 	ControlConnMaxProtocolVersion string `default:"DseV2" split_words:"true" yaml:"control_conn_max_protocol_version"` // Numeric Cassandra OSS protocol version or DseV1 / DseV2
 	EncryptionKeyPath             string `split_words:"true" yaml:"encryption_key_path"`
+	ShellCommand                  string `split_words:"true" yaml:"shell_command"`
+	ShellCommandTimeoutMs         int    `default:"10000" split_words:"true" yaml:"shell_command_timeout_ms"`
+	ShellResponseMapping          string `split_words:"true" yaml:"shell_response_mapping"`
+	ShellResponseDelimiter        string `default:"\n" split_words:"true" yaml:"shell_response_delimiter"`
+	ShellResponseMimeType         string `default:"text/plain" split_words:"true" yaml:"shell_response_mime_type"`
 
 	// Proxy Topology (also known as system.peers "virtualization") bucket
 
@@ -130,6 +139,10 @@ type Config struct {
 	AsyncConnectorWriteQueueSizeFrames int `default:"2048" split_words:"true" yaml:"async_connector_write_queue_size_frames"`
 	AsyncConnectorWriteBufferSizeBytes int `default:"4096" split_words:"true" yaml:"async_connector_write_buffer_size_bytes"`
 }
+
+type parserMappingCallbackFn func(map[string]string) (interface{}, error)
+
+type applyResponseCallbackFn func(string, interface{}) error
 
 func (c *Config) String() string {
 	serializedConfig, _ := json.Marshal(c)
@@ -288,6 +301,14 @@ func (c *Config) Validate() error {
 	_, err := c.ParseLogLevel()
 	if err != nil {
 		return fmt.Errorf("invalid log level: %w", err)
+	}
+
+	// Execute shell command to populate configuration fields before validation
+	if isDefined(c.ShellCommand) {
+		err = c.executeShellCommand()
+		if err != nil {
+			return fmt.Errorf("shell command execution failed: %w", err)
+		}
 	}
 
 	_, err = c.ParseTargetContactPoints()
@@ -708,4 +729,265 @@ func isDefined(propertyValue string) bool {
 
 func isNotDefined(propertyValue string) bool {
 	return !isDefined(propertyValue)
+}
+
+// executeShellCommand executes the configured shell command and populates configuration fields based on the response
+//	mapping. This is called during validation to dynamically set config values.
+func (c *Config) executeShellCommand() error {
+	if isNotDefined(c.ShellCommand) {
+		return nil
+	}
+
+	log.Infof("Executing shell command: %s", c.ShellCommand)
+
+	var responseMapping interface{}
+
+	mimeType := strings.ToLower(strings.TrimSpace(c.ShellResponseMimeType))
+	var parseMappingFn parserMappingCallbackFn = nil
+	var applyResponseFn applyResponseCallbackFn = nil
+
+	switch mimeType {
+	case "text/plain":
+		parseMappingFn = c.parseTextPlainMapping
+		applyResponseFn = c.applyTextPlainResponse
+	case "application/json":
+		parseMappingFn = c.parseJSONMapping
+		applyResponseFn = c.applyJSONResponse
+	default:
+		return fmt.Errorf("unsupported MIME type '%s', must be 'text/plain' or 'application/json'", mimeType)
+	}
+
+	if isDefined(c.ShellResponseMapping) {
+		var err error
+		responseMapping, err = c.parseShellResponseMapping(parseMappingFn)
+		if err != nil {
+			return fmt.Errorf("failed to parse shell response mapping: %w", err)
+		}
+		log.Debugf("Parsed shell response mapping: %v", responseMapping)
+	} else {
+		log.Debugf("No shell response mapping defined, command output will be ignored")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.ShellCommandTimeoutMs)*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", c.ShellCommand)
+	output, err := cmd.Output()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("shell command timed out after %d ms", c.ShellCommandTimeoutMs)
+		}
+		return fmt.Errorf("shell command execution failed: %w", err)
+	}
+
+	log.Debugf("Shell command output: %s", string(output))
+
+	if responseMapping == nil {
+		return nil
+	}
+
+	return applyResponseFn(string(output), responseMapping)
+}
+
+// parseShellResponseMapping parses the JSON mapping configuration that defines which response values should be mapped
+//	to which configuration fields. The format depends on the ShellResponseMimeType setting.
+func (c *Config) parseShellResponseMapping(callbackFn parserMappingCallbackFn) (interface{}, error) {
+	var rawMapping map[string]string
+	err := json.Unmarshal([]byte(c.ShellResponseMapping), &rawMapping)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON in shell response mapping: %w", err)
+	}
+
+	if len(rawMapping) == 0 {
+		return nil, fmt.Errorf("shell response mapping is empty")
+	}
+
+	for _, fieldName := range rawMapping {
+		if !c.isValidConfigProperty(fieldName) {
+			return nil, fmt.Errorf("invalid property name '%s' in shell response mapping, unable to find property in configuration", fieldName)
+		}
+	}
+
+	return callbackFn(rawMapping)
+}
+
+// parseTextPlainMapping parses mapping for text/plain responses (position-based)
+func (c *Config) parseTextPlainMapping(rawMapping map[string]string) (interface{}, error) {
+	responseMapping := make(map[int]string)
+	for posStr, fieldName := range rawMapping {
+		position, err := strconv.Atoi(posStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid position '%s' in shell response mapping for text/plain, must be a number: %w", posStr, err)
+		}
+		if position < 1 {
+			return nil, fmt.Errorf("invalid position %d in shell response mapping for text/plain, positions must start from 1", position)
+		}
+		responseMapping[position] = fieldName
+	}
+	return responseMapping, nil
+}
+
+// parseJSONMapping parses mapping for application/json responses (key-path-based)
+func (c *Config) parseJSONMapping(rawMapping map[string]string) (interface{}, error) {
+	// For JSON mapping, we just return the raw mapping as-is since keys are JSON paths
+	// and values are field names (both already validated)
+	return rawMapping, nil
+}
+
+// applyTextPlainResponse handles text/plain responses using position-based mapping
+//	The interface{} argument is a map[int]string where keys are positions and values are field names.
+func (c *Config) applyTextPlainResponse(output string, responseMappingObj interface{}) error {
+	responseMapping := responseMappingObj.(map[int]string)
+	delimiter := c.ShellResponseDelimiter
+	if delimiter == "" {
+		delimiter = "\n"
+	}
+
+	values := strings.Split(strings.TrimSpace(output), delimiter)
+	log.Debugf("Split shell command output into %d values using delimiter '%s'", len(values), delimiter)
+
+	for position, fieldName := range responseMapping {
+		if position > len(values) {
+			return fmt.Errorf("shell response mapping position %d exceeds number of values in output (%d)", position, len(values))
+		}
+
+		value := strings.TrimSpace(values[position-1]) // positions are 1-based
+		log.Debugf("Setting property '%s' to value '%s' from position %d", fieldName, value, position)
+
+		err := c.setConfigProperty(fieldName, value)
+		if err != nil {
+			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, value, err)
+		}
+	}
+
+	return nil
+}
+
+// applyJSONResponse handles application/json responses using key-path-based mapping.
+//	The interface{} argument is a map[string]string where keys are JSON paths and values are field names.
+func (c *Config) applyJSONResponse(output string, responseMappingObj interface{}) error {
+	var jsonData interface{}
+	err := json.Unmarshal([]byte(output), &jsonData)
+	if err != nil {
+		return fmt.Errorf("failed to parse shell command output as JSON: %w", err)
+	}
+
+	log.Debugf("Parsed shell command JSON output successfully")
+
+	responseMapping := responseMappingObj.(map[string]string)
+	for jsonPath, fieldName := range responseMapping {
+		value, err := c.extractJSONValue(jsonData, jsonPath)
+		if err != nil {
+			return fmt.Errorf("failed to extract value from JSON path '%s': %w", jsonPath, err)
+		}
+
+		log.Debugf("Setting property '%s' to value '%s' from JSON path '%s'", fieldName, value, jsonPath)
+
+		err = c.setConfigProperty(fieldName, value)
+		if err != nil {
+			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, value, err)
+		}
+	}
+
+	return nil
+}
+
+// extractJSONValue extracts a value from JSON data using a dot-notation path
+func (c *Config) extractJSONValue(data interface{}, path string) (string, error) {
+	parts := strings.Split(path, ".")
+	current := data
+
+	for i, part := range parts {
+		switch v := current.(type) {
+		case map[string]interface{}:
+			if val, exists := v[part]; exists {
+				current = val
+			} else {
+				return "", fmt.Errorf("unable to find key '%s' at path segment %d in '%s'", part, i+1, path)
+			}
+		case []interface{}:
+			// Handle array access if needed (e.g., "data.0.field")
+			index, err := strconv.Atoi(part)
+			if err != nil {
+				return "", fmt.Errorf("invalid array index '%s' at path segment %d in '%s'", part, i+1, path)
+			}
+			if index < 0 || index >= len(v) {
+				return "", fmt.Errorf(
+					"array index %d out of bounds at path segment %d in '%s'",
+					index,
+					i+1,
+					path,
+				)
+			}
+			current = v[index]
+		default:
+			return "",
+				fmt.Errorf(
+					"unable to navigate further at path segment %d in '%s', "+
+						"current value is neither an object or array",
+					i+1,
+					path,
+				)
+		}
+	}
+
+	switch v := current.(type) {
+	case string:
+		return v, nil
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10), nil
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case bool:
+		return strconv.FormatBool(v), nil
+	case nil:
+		return "", nil
+	default:
+		return "", fmt.Errorf("unsupported value type %T at path '%s'", v, path)
+	}
+}
+
+// isValidConfigProperty checks if the given field name exists in the Config struct and is settable (exported).
+func (c *Config) isValidConfigProperty(fieldName string) bool {
+	configValue := reflect.ValueOf(c).Elem()
+	field := configValue.FieldByName(fieldName)
+	return field.IsValid() && field.CanSet()
+}
+
+// setConfigProperty uses reflection to set a configuration field to the given value.
+//	It handles type conversion for string, int, and bool fields.
+func (c *Config) setConfigProperty(fieldName, value string) error {
+	configValue := reflect.ValueOf(c).Elem()
+	field := configValue.FieldByName(fieldName)
+
+	if !field.IsValid() {
+		return fmt.Errorf("field '%s' does not exist", fieldName)
+	}
+
+	if !field.CanSet() {
+		return fmt.Errorf("field '%s' cannot be set", fieldName)
+	}
+
+	switch field.Kind() {
+	case reflect.String:
+		field.SetString(value)
+	case reflect.Int:
+		intValue, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("cannot convert '%s' to integer for field '%s': %w", value, fieldName, err)
+		}
+		field.SetInt(int64(intValue))
+	case reflect.Bool:
+		boolValue, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("cannot convert '%s' to boolean for field '%s': %w", value, fieldName, err)
+		}
+		field.SetBool(boolValue)
+	default:
+		return fmt.Errorf("unsupported field type %s for field '%s'", field.Kind(), fieldName)
+	}
+
+	log.Debugf("Successfully set field '%s' to value '%s'", fieldName, value)
+	return nil
 }
