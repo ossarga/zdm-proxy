@@ -23,6 +23,24 @@ jobs:
     steps:
       - name: Check out source code
         uses: actions/checkout@v2
+      - name: Setup version information
+        id: version
+        run: |
+          chmod +x scripts/version.sh
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            export ZDM_VERSION="${{ github.ref_name }}"
+            export ZDM_VERSION_TYPE="release"
+          else
+            export ZDM_VERSION_TYPE="dev"
+          fi
+
+          # Extract version components
+          VERSION=$(./scripts/version.sh version)
+          GIT_HASH=$(git rev-parse --short=7 HEAD)
+
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION_TYPE=${ZDM_VERSION_TYPE:-dev}" >> $GITHUB_OUTPUT
+          echo "GIT_HASH=$GIT_HASH" >> $GITHUB_OUTPUT
       # Setup metadata based on the commit/tag that will be used for tagging the image
       - name: Setup Docker meta
         id: meta
@@ -53,3 +71,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            VERSION_TYPE=${{ steps.version.outputs.VERSION_TYPE }}
+            GIT_HASH=${{ steps.version.outputs.GIT_HASH }}
