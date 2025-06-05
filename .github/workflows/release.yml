@@ -23,6 +23,19 @@ jobs:
     steps:
       - name: Check out source code
         uses: actions/checkout@v2
+      - name: Setup version information
+        id: version
+        run: |
+          chmod +x scripts/version.sh
+
+          # Extract version components
+          VERSION=$(./scripts/version.sh version)
+          BUILD_TYPE=$(./scripts/version.sh all | grep BUILD_TYPE | cut -d'=' -f2)
+          GIT_HASH=$(git rev-parse --short=7 HEAD)
+
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
+          echo "GIT_HASH=$GIT_HASH" >> $GITHUB_OUTPUT
       # Setup metadata based on the commit/tag that will be used for tagging the image
       - name: Setup Docker meta
         id: meta
@@ -53,3 +66,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            BUILD_TYPE=${{ steps.version.outputs.BUILD_TYPE }}
+            GIT_HASH=${{ steps.version.outputs.GIT_HASH }}
