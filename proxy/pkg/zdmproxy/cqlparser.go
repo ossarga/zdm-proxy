@@ -120,9 +120,8 @@ func buildRequestInfo(
 		}
 		preparedDataByStmtIdxMap := make(map[int]PreparedEntry)
 		for childIdx, child := range batchMsg.Children {
-			switch queryOrId := child.QueryOrId.(type) {
-			case []byte:
-				preparedData, err := getPreparedEntry(psCache, mh, queryOrId, primitive.OpCodeBatch, decodedFrame)
+			if child.Id != nil {
+				preparedData, err := getPreparedEntry(psCache, mh, child.Id, primitive.OpCodeBatch, decodedFrame)
 				if err != nil {
 					return nil, err
 				} else {

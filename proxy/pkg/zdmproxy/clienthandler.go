@@ -914,7 +914,7 @@ func (ch *ClientHandler) processClientResponse(
 				return nil, fmt.Errorf("invalid cluster type: %v", responseClusterType)
 			}
 			unpreparedId := preparedEntry.GetClientPreparedId()
-			newFrame = decodedFrame.Clone()
+			newFrame = decodedFrame.DeepCopy()
 			newUnprepared := &message.Unprepared{
 				ErrorMessage: fmt.Sprintf("Prepared query with ID %s not found (either the query was not prepared "+
 					"on this host (maybe the host has been restarted?) or you have prepared too many queries and it has "+
@@ -953,7 +953,7 @@ func (ch *ClientHandler) processPreparedResponse(
 	} else if reqCtx.targetResponse == nil && reqCtx.originResponse == nil {
 		return nil, errors.New("unexpected target response and origin response nil")
 	} else {
-		newResponse := response.Clone()
+		newResponse := response.DeepCopy()
 		newPreparedBody, ok := newResponse.Body.Message.(*message.PreparedResult)
 		if !ok {
 			return nil, fmt.Errorf("expected PREPARED RESULT targetBody in target result response but got %v",
@@ -1788,7 +1788,7 @@ func (ch *ClientHandler) rewriteOriginPrepare(castedRequestInfo *ExecuteRequestI
 			return nil, replacementTimeUuids, fmt.Errorf("could not decode execute raw frame: %w", err)
 		}
 
-		newOriginRequest := clientRequest.Clone()
+		newOriginRequest := clientRequest.DeepCopy()
 		var newOriginExecuteMsg *message.Execute
 		if len(replacedTerms) > 0 {
 			replacementTimeUuids = ch.parameterModifier.generateTimeUuids(prepareRequestInfo)
@@ -1885,12 +1885,12 @@ func (ch *ClientHandler) handleBatchRequest(
 		return nil, nil, fmt.Errorf("could not decode batch raw frame: %w", err)
 	}
 
-	newTargetRequest := decodedFrame.Clone()
+	newTargetRequest := decodedFrame.DeepCopy()
 	newTargetBatchMsg, ok := newTargetRequest.Body.Message.(*message.Batch)
 	if !ok {
 		return nil, nil, fmt.Errorf("expected Batch but got %v instead", newTargetRequest.Body.Message.GetOpCode())
 	}
-	newOriginRequest := decodedFrame.Clone()
+	newOriginRequest := decodedFrame.DeepCopy()
 	newOriginBatchMsg, ok := newOriginRequest.Body.Message.(*message.Batch)
 	if !ok {
 		return nil, nil, fmt.Errorf("expected Batch but got %v instead", newOriginRequest.Body.Message.GetOpCode())
@@ -1916,7 +1916,7 @@ func (ch *ClientHandler) handleBatchRequest(
 		newTargetBatchMsg.Children[stmtIdx].Id = preparedData.GetTargetPreparedId()
 		log.Tracef("Replacing prepared ID %s within a BATCH with %s for target cluster.",
 			hex.EncodeToString(originalQueryId), hex.EncodeToString(preparedData.GetTargetPreparedId()))
-		newOriginBatchMsg.Children[stmtIdx].QueryOrId = preparedData.GetOriginPreparedId()
+		newOriginBatchMsg.Children[stmtIdx].Id = preparedData.GetOriginPreparedId()
 		log.Tracef("Replacing prepared ID %s within a BATCH with %s for origin cluster.",
 			hex.EncodeToString(originalQueryId), hex.EncodeToString(preparedData.GetOriginPreparedId()))
 	}
