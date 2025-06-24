@@ -14,14 +14,15 @@ type statementType string
 type replacementType int
 
 const (
-	statementTypeInsert = statementType("insert")
-	statementTypeUpdate = statementType("update")
-	statementTypeDelete = statementType("delete")
-	statementTypeBatch  = statementType("batch")
-	statementTypeSelect = statementType("select")
-	statementTypeUse    = statementType("use")
-	statementTypeCall   = statementType("call")
-	statementTypeOther  = statementType("other")
+	statementTypeInsert  = statementType("insert")
+	statementTypeUpdate  = statementType("update")
+	statementTypeDelete  = statementType("delete")
+	statementTypeBatch   = statementType("batch")
+	statementTypeSelect  = statementType("select")
+	statementTypeUse     = statementType("use")
+	statementTypeCall    = statementType("call")
+	statementTypeGremlin = statementType("gremlin")
+	statementTypeOther   = statementType("other")
 
 	zdmNowNamedMarker = "zdm__now"
 )
@@ -111,6 +112,91 @@ func inspectCqlQuery(query string, currentKeyspace string, timeUuidGenerator Tim
 	}
 	antlr.ParseTreeWalkerDefault.Walk(listener, cqlParser.CqlStatement())
 	return listener
+}
+
+// isGremlinQuery detects if a query string is a Gremlin query by looking for common Gremlin patterns. This is so we can detect Gremlin queries before sending them to the CQL parser.
+func isGremlinQuery(query string) bool {
+	if query == "" {
+		return false
+	}
+
+	trimmedQuery := strings.TrimSpace(query)
+	lowerQuery := strings.ToLower(trimmedQuery)
+
+	// Check if statement starts with any of the common Gremlin traversal patterns
+	gremlinPatterns := []string{
+		"g.v(",      // g.V() - vertex traversal
+		"g.e(",      // g.E() - edge traversal
+		"g.addv(",   // g.addV() - add vertex
+		"g.adde(",   // g.addE() - add edge
+		"g.inject(", // g.inject() - inject values
+	}
+
+	for _, pattern := range gremlinPatterns {
+		if strings.HasPrefix(lowerQuery, pattern) {
+			return true
+		}
+	}
+
+	// Check if the statement contains any Gremlin step patterns
+	gremlinSteps := []string{
+		".has(",        // .has() - filter step
+		".where(",      // .where() - filter step
+		".out(",        // .out() - traversal step
+		".in(",         // .in() - traversal step
+		".both(",       // .both() - traversal step
+		".outv(",       // .outV() - vertex step
+		".inv(",        // .inV() - vertex step
+		".oute(",       // .outE() - edge step
+		".ine(",        // .inE() - edge step
+		".bothe(",      // .bothE() - edge step
+		".bothv(",      // .bothV() - vertex step
+		".property(",   // .property() - property step
+		".values(",     // .values() - value step
+		".valuemap(",   // .valueMap() - value map step
+		".path(",       // .path() - path step
+		".drop(",       // .drop() - drop step
+		".count(",      // .count() - count step
+		".fold(",       // .fold() - fold step
+		".unfold(",     // .unfold() - unfold step
+		".group(",      // .group() - group step
+		".groupcount(", // .groupCount() - group count step
+		".order(",      // .order() - order step
+		".by(",         // .by() - by step
+		".as(",         // .as() - label step
+		".select(",     // .select() - select step
+		".project(",    // .project() - project step
+		".match(",      // .match() - match step
+		".union(",      // .union() - union step
+		".repeat(",     // .repeat() - repeat step
+		".until(",      // .until() - until step
+		".emit(",       // .emit() - emit step
+		".times(",      // .times() - times step
+		".limit(",      // .limit() - limit step
+		".range(",      // .range() - range step
+		".skip(",       // .skip() - skip step
+		".tail(",       // .tail() - tail step
+		".sample(",     // .sample() - sample step
+		".dedup(",      // .dedup() - dedup step
+		".simplepath(", // .simplePath() - simple path step
+		".cyclicpath(", // .cyclicPath() - cyclic path step
+	}
+
+	for _, step := range gremlinSteps {
+		if strings.Contains(lowerQuery, step) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// createGremlinQueryInfo creates a QueryInfo implementation for Gremlin queries
+func createGremlinQueryInfo(query string, currentKeyspace string) QueryInfo {
+	return &gremlinQueryInfo{
+		query:           query,
+		requestKeyspace: currentKeyspace,
+	}
 }
 
 type functionCall struct {
@@ -914,6 +1000,78 @@ func (l *cqlListener) replaceNowFunctionCallsWithNamedBindMarkers() (QueryInfo, 
 			return "", noReplacement
 		}
 	})
+}
+
+// gremlinQueryInfo implements QueryInfo for Gremlin queries. This exists so we can detect a Gremlin statement before
+// sending it to the CQL parser. The majority of the methods return empty, false, or nil values since Gremlin queries
+// have a different structure to CQL queries.
+type gremlinQueryInfo struct {
+	query           string
+	requestKeyspace string
+}
+
+func (g *gremlinQueryInfo) getQuery() string {
+	return g.query
+}
+
+func (g *gremlinQueryInfo) getStatementType() statementType {
+	return statementTypeGremlin
+}
+
+func (g *gremlinQueryInfo) getKeyspaceName() string {
+	return ""
+}
+
+func (g *gremlinQueryInfo) getTableName() string {
+	return ""
+}
+
+func (g *gremlinQueryInfo) getCallRpcName() string {
+	return ""
+}
+
+func (g *gremlinQueryInfo) isFullyQualified() bool {
+	return false
+}
+
+func (g *gremlinQueryInfo) getRequestKeyspace() string {
+	return g.requestKeyspace
+}
+
+func (g *gremlinQueryInfo) getApplicableKeyspace() string {
+	return g.requestKeyspace
+}
+
+func (g *gremlinQueryInfo) getParsedStatements() []*parsedStatement {
+	return nil
+}
+
+func (g *gremlinQueryInfo) getParsedSelectClause() *selectClause {
+	return nil
+}
+
+func (g *gremlinQueryInfo) hasPositionalBindMarkers() bool {
+	return false
+}
+
+func (g *gremlinQueryInfo) hasNamedBindMarkers() bool {
+	return false
+}
+
+func (g *gremlinQueryInfo) hasNowFunctionCalls() bool {
+	return false
+}
+
+func (g *gremlinQueryInfo) replaceNowFunctionCallsWithLiteral() (QueryInfo, []*term) {
+	return g, nil
+}
+
+func (g *gremlinQueryInfo) replaceNowFunctionCallsWithPositionalBindMarkers() (QueryInfo, []*term) {
+	return g, nil
+}
+
+func (g *gremlinQueryInfo) replaceNowFunctionCallsWithNamedBindMarkers() (QueryInfo, []*term) {
+	return g, nil
 }
 
 func (l *cqlListener) shallowClone() *cqlListener {

@@ -1,6 +1,11 @@
 package zdmproxy
 
 import (
+	"github.com/datastax/go-cassandra-native-protocol/frame"
+	"github.com/datastax/go-cassandra-native-protocol/message"
+	"github.com/datastax/go-cassandra-native-protocol/primitive"
+	"github.com/datastax/zdm-proxy/proxy/pkg/common"
+	"github.com/datastax/zdm-proxy/proxy/pkg/metrics"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -581,6 +586,256 @@ func TestNowFunctionCalls(t *testing.T) {
 			assert.Equal(t, tt.expectedReplacedTerms, replacedTerms3)
 		})
 	}
+}
+
+func TestIsGremlinQuery(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		expected bool
+	}{
+		// Positive cases - should be detected as Gremlin
+		{
+			"simple vertex traversal",
+			"g.V()",
+			true,
+		},
+		{
+			"vertex traversal with ID",
+			"g.V(123)",
+			true,
+		},
+		{
+			"edge traversal",
+			"g.E()",
+			true,
+		},
+		{
+			"add vertex",
+			"g.addV('person')",
+			true,
+		},
+		{
+			"add edge",
+			"g.addE('knows')",
+			true,
+		},
+		{
+			"complex traversal with steps",
+			"g.V().has('name', 'john').out('knows').values('name')",
+			true,
+		},
+		{
+			"traversal with where clause",
+			"g.V().where(out('created').count().is(gt(1)))",
+			true,
+		},
+		{
+			"traversal with property",
+			"g.V().property('age', 30)",
+			true,
+		},
+		{
+			"traversal with path",
+			"g.V().out().path()",
+			true,
+		},
+		{
+			"traversal with group",
+			"g.V().group().by('name')",
+			true,
+		},
+		{
+			"case insensitive detection",
+			"G.V().HAS('name', 'john')",
+			true,
+		},
+		{
+			"whitespace before query",
+			"  \t\n  g.V().out()",
+			true,
+		},
+		{
+			"inject traversal",
+			"g.inject(1,2,3)",
+			true,
+		},
+		{
+			"query with multiple steps",
+			"g.V().has('person', 'name', 'marko').out('knows').has('age', gt(30)).values('name')",
+			true,
+		},
+		{
+			"query with repeat",
+			"g.V().repeat(out()).times(3)",
+			true,
+		},
+		{
+			"query with match",
+			"g.V().match(__.as('a').out('knows').as('b'))",
+			true,
+		},
+		{
+			"query with union",
+			"g.V().union(out('knows'), out('created'))",
+			true,
+		},
+		{
+			"query with select",
+			"g.V().as('a').out().as('b').select('a', 'b')",
+			true,
+		},
+		{
+			"query with project",
+			"g.V().project('name', 'age').by('name').by('age')",
+			true,
+		},
+		{
+			"query with limit",
+			"g.V().limit(10)",
+			true,
+		},
+		{
+			"query with order",
+			"g.V().order().by('name')",
+			true,
+		},
+		{
+			"query with dedup",
+			"g.V().out().dedup()",
+			true,
+		},
+		{
+			"query with drop",
+			"g.V().has('name', 'test').drop()",
+			true,
+		},
+		// Negative cases - should NOT be detected as Gremlin
+		{
+			"empty query",
+			"",
+			false,
+		},
+		{
+			"whitespace only",
+			"   \t\n   ",
+			false,
+		},
+		{
+			"CQL SELECT",
+			"SELECT * FROM users WHERE name = 'john'",
+			false,
+		},
+		{
+			"CQL INSERT",
+			"INSERT INTO users (id, name) VALUES (1, 'john')",
+			false,
+		},
+		{
+			"CQL UPDATE",
+			"UPDATE users SET name = 'jane' WHERE id = 1",
+			false,
+		},
+		{
+			"CQL DELETE",
+			"DELETE FROM users WHERE id = 1",
+			false,
+		},
+		{
+			"CQL CREATE",
+			"CREATE TABLE users (id int PRIMARY KEY, name text)",
+			false,
+		},
+		{
+			"SQL-like query",
+			"SELECT g.value FROM graph_table g WHERE g.id = 1",
+			false,
+		},
+		{
+			"text containing 'g.V' but not Gremlin",
+			"This is a description about g.V() function",
+			false,
+		},
+		{
+			"function call that looks like Gremlin but isn't",
+			"SELECT myfunction.g.V() FROM table",
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := isGremlinQuery(tt.query)
+			assert.Equal(t, tt.expected, actual, "Query: %s", tt.query)
+		})
+	}
+}
+
+func TestCreateGremlinQueryInfo(t *testing.T) {
+	query := "g.V().has('name', 'john').out('knows')"
+	keyspace := "test_keyspace"
+
+	queryInfo := createGremlinQueryInfo(query, keyspace)
+
+	assert.Equal(t, query, queryInfo.getQuery())
+	assert.Equal(t, statementTypeGremlin, queryInfo.getStatementType())
+	assert.Equal(t, "", queryInfo.getKeyspaceName())
+	assert.Equal(t, "", queryInfo.getTableName())
+	assert.Equal(t, "", queryInfo.getCallRpcName())
+	assert.False(t, queryInfo.isFullyQualified())
+	assert.Equal(t, keyspace, queryInfo.getRequestKeyspace())
+	assert.Equal(t, keyspace, queryInfo.getApplicableKeyspace())
+	assert.Nil(t, queryInfo.getParsedStatements())
+	assert.Nil(t, queryInfo.getParsedSelectClause())
+	assert.False(t, queryInfo.hasPositionalBindMarkers())
+	assert.False(t, queryInfo.hasNamedBindMarkers())
+	assert.False(t, queryInfo.hasNowFunctionCalls())
+
+	// Test replacement methods return the same instance
+	literal, terms1 := queryInfo.replaceNowFunctionCallsWithLiteral()
+	assert.Equal(t, queryInfo, literal)
+	assert.Nil(t, terms1)
+
+	positional, terms2 := queryInfo.replaceNowFunctionCallsWithPositionalBindMarkers()
+	assert.Equal(t, queryInfo, positional)
+	assert.Nil(t, terms2)
+
+	named, terms3 := queryInfo.replaceNowFunctionCallsWithNamedBindMarkers()
+	assert.Equal(t, queryInfo, named)
+	assert.Nil(t, terms3)
+}
+
+func TestGremlinQueryIntegration(t *testing.T) {
+	// Test that Gremlin queries are properly detected and processed through the frame inspection
+	generator, err := newTimeUuidGenerator()
+	require.Nil(t, err)
+
+	// Create a mock Query frame with a Gremlin query
+	queryFrame := frame.NewFrame(primitive.ProtocolVersion4, 1, &message.Query{
+		Query:   "g.V().has('name', 'john').out('knows').values('name')",
+		Options: &message.QueryOptions{},
+	})
+
+	// Convert to RawFrame for inspection using the default codec
+	rawFrame, err := defaultCodec.ConvertToRawFrame(queryFrame)
+	require.Nil(t, err)
+
+	// Create a fake metric handler for testing
+	metricHandler := &metrics.MetricHandler{}
+
+	// Inspect the frame using buildRequestInfo (which is what InspectFrame calls internally)
+	frameContext := &frameDecodeContext{frame: rawFrame}
+	requestInfo, err := buildRequestInfo(frameContext, []*statementReplacedTerms{}, NewPreparedStatementCache(), metricHandler, "", common.ClusterTypeOrigin, false, false, false, generator)
+	require.Nil(t, err)
+
+	// Verify it's recognized as a generic request (since Gremlin queries are forwarded to both)
+	genericInfo, ok := requestInfo.(*GenericRequestInfo)
+	require.True(t, ok, "Expected GenericRequestInfo for Gremlin query")
+
+	// Verify forward decision is set to both
+	assert.Equal(t, forwardToBoth, genericInfo.GetForwardDecision())
+	assert.False(t, genericInfo.ShouldAlsoBeSentAsync())
+	assert.True(t, genericInfo.ShouldBeTrackedInMetrics())
 }
 
 type fakeTimeUuidGenerator struct {

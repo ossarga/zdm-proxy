@@ -1,6 +1,7 @@
 package zdmproxy
 
 import (
+	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"github.com/datastax/go-cassandra-native-protocol/frame"
@@ -22,49 +23,72 @@ func TestInspectFrame(t *testing.T) {
 		forwardSystemQueriesToTarget bool
 		forwardAuthToTarget          bool
 	}
-	originCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("ORIGIN"),
-		targetPreparedId:   []byte("ORIGIN_TARGET"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, false, false), nil, false, "", ""),
-	}
-	targetCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("TARGET"),
-		targetPreparedId:   []byte("TARGET_TARGET"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, false), nil, false, "", ""),
-	}
-	bothCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("BOTH"),
-		targetPreparedId:   []byte("BOTH_TARGET"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), nil, false, "", ""),
-	}
-	peersKsCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("PEERS_KS"),
-		targetPreparedId:   []byte("PEERS_KS"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), nil, false, "SELECT * FROM peers", "system"),
-	}
-	peersCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("PEERS"),
-		targetPreparedId:   []byte("PEERS"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), nil, false, "SELECT * FROM system.peers", ""),
-	}
-	localKsCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("LOCAL_KS"),
-		targetPreparedId:   []byte("LOCAL_KS"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), nil, false, "SELECT * FROM local", "system"),
-	}
-	localCacheEntry := &preparedDataImpl{
-		originPreparedId:   []byte("LOCAL"),
-		targetPreparedId:   []byte("LOCAL"),
-		prepareRequestInfo: NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), nil, false, "SELECT * FROM system.local", ""),
-	}
+	// Create proper MD5 hashes for test IDs
+	originId := md5.Sum([]byte("ORIGIN"))
+	targetId := md5.Sum([]byte("TARGET"))
+	bothId := md5.Sum([]byte("BOTH"))
+	peersKsId := md5.Sum([]byte("PEERS_KS"))
+	peersId := md5.Sum([]byte("PEERS"))
+	localKsId := md5.Sum([]byte("LOCAL_KS"))
+	localId := md5.Sum([]byte("LOCAL"))
+
+	originCacheEntry := NewPreparedEntry(
+		originId,
+		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, false, false), false, []*term{}, false, "", "", ""),
+		&preparedDataImpl{
+			originPreparedId: []byte("ORIGIN"),
+			targetPreparedId: []byte("ORIGIN_TARGET"),
+		})
+	targetCacheEntry := NewPreparedEntry(
+		targetId,
+		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, false), false, []*term{}, false, "", "", ""),
+		&preparedDataImpl{
+			originPreparedId: []byte("TARGET"),
+			targetPreparedId: []byte("TARGET_TARGET"),
+		})
+	bothCacheEntry := NewPreparedEntry(
+		bothId,
+		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), false, []*term{}, false, "", "", ""),
+		&preparedDataImpl{
+			originPreparedId: []byte("BOTH"),
+			targetPreparedId: []byte("BOTH_TARGET"),
+		})
+	peersKsCacheEntry := NewPreparedEntry(
+		peersKsId,
+		NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, []*term{}, false, "system", "SELECT * FROM peers", "system"),
+		&preparedDataImpl{
+			originPreparedId: []byte("PEERS_KS"),
+			targetPreparedId: []byte("PEERS_KS"),
+		})
+	peersCacheEntry := NewPreparedEntry(
+		peersId,
+		NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.peers", ""),
+		&preparedDataImpl{
+			originPreparedId: []byte("PEERS"),
+			targetPreparedId: []byte("PEERS"),
+		})
+	localKsCacheEntry := NewPreparedEntry(
+		localKsId,
+		NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, []*term{}, false, "system", "SELECT * FROM local", "system"),
+		&preparedDataImpl{
+			originPreparedId: []byte("LOCAL_KS"),
+			targetPreparedId: []byte("LOCAL_KS"),
+		})
+	localCacheEntry := NewPreparedEntry(
+		localId,
+		NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.local", ""),
+		&preparedDataImpl{
+			originPreparedId: []byte("LOCAL"),
+			targetPreparedId: []byte("LOCAL"),
+		})
 	psCache := NewPreparedStatementCache()
-	psCache.cache["BOTH"] = bothCacheEntry
-	psCache.cache["ORIGIN"] = originCacheEntry
-	psCache.cache["TARGET"] = targetCacheEntry
-	psCache.interceptedCache["PEERS"] = peersCacheEntry
-	psCache.interceptedCache["PEERS_KS"] = peersKsCacheEntry
-	psCache.interceptedCache["LOCAL"] = localCacheEntry
-	psCache.interceptedCache["LOCAL_KS"] = localKsCacheEntry
+	psCache.cache[bothId] = bothCacheEntry
+	psCache.cache[originId] = originCacheEntry
+	psCache.cache[targetId] = targetCacheEntry
+	psCache.cache[peersId] = peersCacheEntry
+	psCache.cache[peersKsId] = peersKsCacheEntry
+	psCache.cache[localId] = localCacheEntry
+	psCache.cache[localKsId] = localKsCacheEntry
 	mh := newFakeMetricHandler()
 	km := ""
 	primaryClusterTarget := common.ClusterTypeTarget
@@ -97,21 +121,34 @@ func TestInspectFrame(t *testing.T) {
 		{"OpCodeQuery CALL insightsrpc.reportinsight('a', 1, -2.3, true, '2020-01-01')", args{mockQueryFrame(t, "CALL InsightsRpc.reportInsight('a', 1, -2.3, true, '2020-01-01')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToNone, false, false)},
 		{"OpCodeQuery CALL DseGraphRpc.getSchemaBlob(?)", args{mockQueryFrame(t, "CALL DseGraphRpc.getSchemaBlob(?)"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
 
+		// GREMLIN QUERIES
+		{"OpCodeQuery Gremlin g.V()", args{mockQueryFrame(t, "g.V()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.V().has('name', 'john')", args{mockQueryFrame(t, "g.V().has('name', 'john')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.addV('person')", args{mockQueryFrame(t, "g.addV('person')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.E().drop()", args{mockQueryFrame(t, "g.E().drop()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin complex traversal", args{mockQueryFrame(t, "g.V().has('person', 'name', 'marko').out('knows').has('age', gt(30)).values('name')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin with primaryClusterTarget", args{mockQueryFrame(t, "g.V().out('knows')"), []*term{}, primaryClusterTarget, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+
 		// PREPARE
-		{"OpCodePrepare SELECT", args{mockPrepareFrame(t, "SELECT blah FROM ks1.t1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, true, true), []*term{}, false, "SELECT blah FROM ks1.t1", "")},
-		{"OpCodePrepare SELECT system.local forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.local"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.local", "")},
-		{"OpCodePrepare SELECT system.peers forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.peers"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.peers", "")},
-		{"OpCodePrepare SELECT system.local", args{mockPrepareFrame(t, "SELECT * FROM system.local"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.local", "")},
-		{"OpCodePrepare SELECT local", args{mockPrepareFrameWithKeyspace(t, "SELECT * FROM local", "system"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), []*term{}, false, "SELECT * FROM local", "system")},
-		{"OpCodePrepare SELECT system.peers", args{mockPrepareFrame(t, "SELECT * FROM system.peers"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.peers", "")},
-		{"OpCodePrepare SELECT peers", args{mockPrepareFrameWithKeyspace(t, "SELECT * FROM peers", "system"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), []*term{}, false, "SELECT * FROM peers", "system")},
-		{"OpCodePrepare SELECT system.peers_v2", args{mockPrepareFrame(t, "SELECT * FROM system.peers_v2"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV2, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.peers_v2", "")},
-		{"OpCodePrepare SELECT system.peers_v2 forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.peers_v2"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV2, newStarSelectClause()), []*term{}, false, "SELECT * FROM system.peers_v2", "")},
-		{"OpCodePrepare SELECT system_auth.roles", args{mockPrepareFrame(t, "SELECT * FROM system_auth.roles"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, true), []*term{}, false, "SELECT * FROM system_auth.roles", "")},
-		{"OpCodePrepare SELECT dse_insights.tokens", args{mockPrepareFrame(t, "SELECT * FROM dse_insights.tokens"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, true), []*term{}, false, "SELECT * FROM dse_insights.tokens", "")},
-		{"OpCodePrepare INSERT INTO asd (a, b) VALUES (1, 2)", args{mockPrepareFrame(t, "INSERT INTO asd (a, b) VALUES (1, 2)"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), []*term{}, false, "INSERT INTO asd (a, b) VALUES (1, 2)", "")},
-		{"OpCodePrepare UPDATE asd SET b = 2 WHERE a = 1", args{mockPrepareFrame(t, "UPDATE asd SET b = 2 WHERE a = 1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), []*term{}, false, "UPDATE asd SET b = 2 WHERE a = 1", "")},
-		{"OpCodePrepare UNKNOWN", args{mockPrepareFrame(t, "UNKNOWN"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), []*term{}, false, "UNKNOWN", "")},
+		{"OpCodePrepare SELECT", args{mockPrepareFrame(t, "SELECT blah FROM ks1.t1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, true, true), false, []*term{}, false, "", "SELECT blah FROM ks1.t1", "")},
+		{"OpCodePrepare SELECT system.local forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.local"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.local", "")},
+		{"OpCodePrepare SELECT system.peers forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.peers"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.peers", "")},
+		{"OpCodePrepare SELECT system.local", args{mockPrepareFrame(t, "SELECT * FROM system.local"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.local", "")},
+		{"OpCodePrepare SELECT local", args{mockPrepareFrameWithKeyspace(t, "SELECT * FROM local", "system"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM local", "system")},
+		{"OpCodePrepare SELECT system.peers", args{mockPrepareFrame(t, "SELECT * FROM system.peers"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.peers", "")},
+		{"OpCodePrepare SELECT peers", args{mockPrepareFrameWithKeyspace(t, "SELECT * FROM peers", "system"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM peers", "system")},
+		{"OpCodePrepare SELECT system.peers_v2", args{mockPrepareFrame(t, "SELECT * FROM system.peers_v2"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV2, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.peers_v2", "")},
+		{"OpCodePrepare SELECT system.peers_v2 forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.peers_v2"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV2, newStarSelectClause()), false, []*term{}, false, "", "SELECT * FROM system.peers_v2", "")},
+		{"OpCodePrepare SELECT system_auth.roles", args{mockPrepareFrame(t, "SELECT * FROM system_auth.roles"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, true), false, []*term{}, false, "", "SELECT * FROM system_auth.roles", "")},
+		{"OpCodePrepare SELECT dse_insights.tokens", args{mockPrepareFrame(t, "SELECT * FROM dse_insights.tokens"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, true), false, []*term{}, false, "", "SELECT * FROM dse_insights.tokens", "")},
+		{"OpCodePrepare INSERT INTO asd (a, b) VALUES (1, 2)", args{mockPrepareFrame(t, "INSERT INTO asd (a, b) VALUES (1, 2)"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "INSERT INTO asd (a, b) VALUES (1, 2)", "")},
+		{"OpCodePrepare UPDATE asd SET b = 2 WHERE a = 1", args{mockPrepareFrame(t, "UPDATE asd SET b = 2 WHERE a = 1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "UPDATE asd SET b = 2 WHERE a = 1", "")},
+		{"OpCodePrepare UNKNOWN", args{mockPrepareFrame(t, "UNKNOWN"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "UNKNOWN", "")},
+
+		// GREMLIN PREPARE
+		{"OpCodePrepare Gremlin g.V()", args{mockPrepareFrame(t, "g.V()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.V()", "")},
+		{"OpCodePrepare Gremlin g.V().has('name', 'john')", args{mockPrepareFrame(t, "g.V().has('name', 'john')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.V().has('name', 'john')", "")},
+		{"OpCodePrepare Gremlin g.addV('person')", args{mockPrepareFrame(t, "g.addV('person')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.addV('person')", "")},
 
 		// EXECUTE
 		{"OpCodeExecute origin", args{mockExecuteFrame(t, "ORIGIN"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewExecuteRequestInfo(originCacheEntry)},
@@ -125,8 +162,13 @@ func TestInspectFrame(t *testing.T) {
 		// REGISTER
 		{"OpCodeRegister", args{mockFrame(t, &message.Register{EventTypes: []primitive.EventType{primitive.EventTypeSchemaChange}}, primitive.ProtocolVersion4), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, false)},
 		// BATCH
-		{"OpCodeBatch simple", args{mockBatch(t, "simple query"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedData{})},
-		{"OpCodeBatch prepared", args{mockBatch(t, []byte("BOTH")), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedData{0: bothCacheEntry})},
+		{"OpCodeBatch simple", args{mockBatch(t, "simple query"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
+		{"OpCodeBatch prepared", args{mockBatch(t, []byte("BOTH")), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{0: bothCacheEntry})},
+		{"OpCodeBatch with Gremlin", args{mockBatch(t, "g.V().drop()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
+		{"OpCodeBatch mixed CQL and Gremlin", args{mockBatchWithChildren(t, []*message.BatchChild{
+			{Query: "INSERT INTO test (id, name) VALUES (1, 'test')"},
+			{Query: "g.V().has('id', 1).drop()"},
+		}), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
 		// AUTH_RESPONSE
 		{"OpCodeAuthResponse ForwardAuthToTarget", args{mockAuthResponse(t), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToTarget}, NewGenericRequestInfo(forwardToTarget, false, false)},
 		{"OpCodeAuthResponse ForwardAuthToOrigin", args{mockAuthResponse(t), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToOrigin, false, false)},

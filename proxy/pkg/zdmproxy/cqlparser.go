@@ -232,6 +232,11 @@ func getRequestInfoFromQueryInfo(
 			trackMetrics = false
 			sendAlsoToAsync = false
 		}
+	} else if queryInfo.getStatementType() == statementTypeGremlin {
+		log.Debugf("Detected Gremlin query: %v with stream id: %v", queryInfo.getQuery(), f.Header.StreamId)
+		forwardDecision = forwardToBoth
+		sendAlsoToAsync = false
+		trackMetrics = true
 	} else {
 		sendAlsoToAsync = false
 	}
@@ -354,15 +359,27 @@ func (recv *frameDecodeContext) inspectStatements(currentKeyspace string, timeUu
 			typedMsg.Options.Flags().Contains(primitive.QueryFlagWithKeyspace) {
 			currentKeyspace = typedMsg.Options.Keyspace
 		}
-		statementsQueryData = []*statementQueryData{
-			{statementIndex: 0, queryData: inspectCqlQuery(typedMsg.Query, currentKeyspace, timeUuidGenerator)}}
+		if isGremlinQuery(typedMsg.Query) {
+			log.Tracef("Detected Gremlin query, bypassing CQL parser: %v", typedMsg.Query)
+			statementsQueryData = []*statementQueryData{
+				{statementIndex: 0, queryData: createGremlinQueryInfo(typedMsg.Query, currentKeyspace)}}
+		} else {
+			statementsQueryData = []*statementQueryData{
+				{statementIndex: 0, queryData: inspectCqlQuery(typedMsg.Query, currentKeyspace, timeUuidGenerator)}}
+		}
 	case *message.Prepare:
 		if protocolSupportsKeyspaceInRequest(decodedFrame.Header.Version) &&
 			typedMsg.Flags().Contains(primitive.PrepareFlagWithKeyspace) {
 			currentKeyspace = typedMsg.Keyspace
 		}
-		statementsQueryData = []*statementQueryData{
-			{statementIndex: 0, queryData: inspectCqlQuery(typedMsg.Query, currentKeyspace, timeUuidGenerator)}}
+		if isGremlinQuery(typedMsg.Query) {
+			log.Tracef("Detected Gremlin prepare query, bypassing CQL parser: %v", typedMsg.Query)
+			statementsQueryData = []*statementQueryData{
+				{statementIndex: 0, queryData: createGremlinQueryInfo(typedMsg.Query, currentKeyspace)}}
+		} else {
+			statementsQueryData = []*statementQueryData{
+				{statementIndex: 0, queryData: inspectCqlQuery(typedMsg.Query, currentKeyspace, timeUuidGenerator)}}
+		}
 	case *message.Batch:
 		if protocolSupportsKeyspaceInRequest(decodedFrame.Header.Version) &&
 			typedMsg.Flags().Contains(primitive.QueryFlagWithKeyspace) {
@@ -370,9 +387,16 @@ func (recv *frameDecodeContext) inspectStatements(currentKeyspace string, timeUu
 		}
 		for idx, childStmt := range typedMsg.Children {
 			if len(childStmt.Query) > 0 {
-				statementsQueryData = append(
-					statementsQueryData, &statementQueryData{
-						statementIndex: idx, queryData: inspectCqlQuery(childStmt.Query, currentKeyspace, timeUuidGenerator)})
+				if isGremlinQuery(childStmt.Query) {
+					log.Tracef("Detected Gremlin query in batch, bypassing CQL parser: %v", childStmt.Query)
+					statementsQueryData = append(
+						statementsQueryData, &statementQueryData{
+							statementIndex: idx, queryData: createGremlinQueryInfo(childStmt.Query, currentKeyspace)})
+				} else {
+					statementsQueryData = append(
+						statementsQueryData, &statementQueryData{
+							statementIndex: idx, queryData: inspectCqlQuery(childStmt.Query, currentKeyspace, timeUuidGenerator)})
+				}
 			}
 		}
 	default:
