@@ -24,48 +24,58 @@ func TestInspectFrame(t *testing.T) {
 		forwardSystemQueriesToTarget bool
 		forwardAuthToTarget          bool
 	}
+
+	// Create proper MD5 hashes for test IDs
+	originId := md5.Sum([]byte("ORIGIN"))
+	targetId := md5.Sum([]byte("TARGET"))
+	bothId := md5.Sum([]byte("BOTH"))
+	peersKsId := md5.Sum([]byte("PEERS_KS"))
+	peersId := md5.Sum([]byte("PEERS"))
+	localKsId := md5.Sum([]byte("LOCAL_KS"))
+	localId := md5.Sum([]byte("LOCAL"))
+
 	originEntry := NewPreparedEntry(
-		md5.Sum([]byte("ORIGIN")),
+		originId,
 		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, false, false), false, nil, false, "", "", ""),
 		&preparedDataImpl{
 			originPreparedId: []byte("ORIGIN"),
 			targetPreparedId: []byte("ORIGIN_TARGET"),
 		})
 	targetEntry := NewPreparedEntry(
-		md5.Sum([]byte("TARGET")),
+		targetId,
 		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToTarget, false, false), false, nil, false, "", "", ""),
 		&preparedDataImpl{
 			originPreparedId: []byte("TARGET"),
 			targetPreparedId: []byte("TARGET_TARGET"),
 		})
 	bothEntry := NewPreparedEntry(
-		md5.Sum([]byte("BOTH")),
+		bothId,
 		NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, false), false, nil, false, "", "", ""),
 		&preparedDataImpl{
 			originPreparedId: []byte("BOTH"),
 			targetPreparedId: []byte("BOTH_TARGET"),
 		})
 	peersKsEntry := NewInterceptedPreparedEntry(
-		md5.Sum([]byte("PEERS_KS")),
+		peersKsId,
 		NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), false, nil, false, "", "SELECT * FROM peers", "system"))
 	peersEntry := NewInterceptedPreparedEntry(
-		md5.Sum([]byte("PEERS")),
+		peersId,
 		NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), true, nil, false, "", "SELECT * FROM system.peers", ""))
 	localKsEntry := NewInterceptedPreparedEntry(
-		md5.Sum([]byte("LOCAL_KS")),
+		localKsId,
 		NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), false, nil, false, "", "SELECT * FROM local", "system"))
 	localEntry := NewInterceptedPreparedEntry(
-		md5.Sum([]byte("LOCAL")),
+		localId,
 		NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), true, nil, false, "", "SELECT * FROM system.local", ""))
 
 	psCache := createPSCacheForTests(t)
-	psCache.cache.Add(md5.Sum([]byte("BOTH")), bothEntry)
-	psCache.cache.Add(md5.Sum([]byte("ORIGIN")), originEntry)
-	psCache.cache.Add(md5.Sum([]byte("TARGET")), targetEntry)
-	psCache.cache.Add(md5.Sum([]byte("PEERS")), peersEntry)
-	psCache.cache.Add(md5.Sum([]byte("PEERS_KS")), peersKsEntry)
-	psCache.cache.Add(md5.Sum([]byte("LOCAL")), localEntry)
-	psCache.cache.Add(md5.Sum([]byte("LOCAL_KS")), localKsEntry)
+	psCache.cache.Add(bothId, bothEntry)
+	psCache.cache.Add(originId, originEntry)
+	psCache.cache.Add(targetId, targetEntry)
+	psCache.cache.Add(peersId, peersEntry)
+	psCache.cache.Add(peersKsId, peersKsEntry)
+	psCache.cache.Add(localId, localEntry)
+	psCache.cache.Add(localKsId, localKsEntry)
 	mh := newFakeMetricHandler()
 	km := ""
 	primaryClusterTarget := common.ClusterTypeTarget
@@ -98,7 +108,16 @@ func TestInspectFrame(t *testing.T) {
 		{"OpCodeQuery CALL insightsrpc.reportinsight('a', 1, -2.3, true, '2020-01-01')", args{mockQueryFrame(t, "CALL InsightsRpc.reportInsight('a', 1, -2.3, true, '2020-01-01')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToNone, false, false)},
 		{"OpCodeQuery CALL DseGraphRpc.getSchemaBlob(?)", args{mockQueryFrame(t, "CALL DseGraphRpc.getSchemaBlob(?)"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
 
+		// GREMLIN QUERIES
+		{"OpCodeQuery Gremlin g.V()", args{mockQueryFrame(t, "g.V()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.V().has('name', 'john')", args{mockQueryFrame(t, "g.V().has('name', 'john')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.addV('person')", args{mockQueryFrame(t, "g.addV('person')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin g.E().drop()", args{mockQueryFrame(t, "g.E().drop()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin complex traversal", args{mockQueryFrame(t, "g.V().has('person', 'name', 'marko').out('knows').has('age', gt(30)).values('name')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+		{"OpCodeQuery Gremlin with primaryClusterTarget", args{mockQueryFrame(t, "g.V().out('knows')"), []*term{}, primaryClusterTarget, forwardSystemQueriesToTarget, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToBoth, false, true)},
+
 		// PREPARE
+
 		{"OpCodePrepare SELECT", args{mockPrepareFrame(t, "SELECT blah FROM ks1.t1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToOrigin, true, true), true, []*term{}, false, "", "SELECT blah FROM ks1.t1", "")},
 		{"OpCodePrepare SELECT system.local forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.local"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(local, newStarSelectClause()), true, []*term{}, false, "", "SELECT * FROM system.local", "")},
 		{"OpCodePrepare SELECT system.peers forwardSystemQueriesToOrigin", args{mockPrepareFrame(t, "SELECT * FROM system.peers"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewInterceptedRequestInfo(peersV1, newStarSelectClause()), true, []*term{}, false, "", "SELECT * FROM system.peers", "")},
@@ -114,6 +133,11 @@ func TestInspectFrame(t *testing.T) {
 		{"OpCodePrepare UPDATE asd SET b = 2 WHERE a = 1", args{mockPrepareFrame(t, "UPDATE asd SET b = 2 WHERE a = 1"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "UPDATE asd SET b = 2 WHERE a = 1", "")},
 		{"OpCodePrepare UNKNOWN", args{mockPrepareFrame(t, "UNKNOWN"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "UNKNOWN", "")},
 
+		// GREMLIN PREPARE
+		{"OpCodePrepare Gremlin g.V()", args{mockPrepareFrame(t, "g.V()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.V()", "")},
+		{"OpCodePrepare Gremlin g.V().has('name', 'john')", args{mockPrepareFrame(t, "g.V().has('name', 'john')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.V().has('name', 'john')", "")},
+		{"OpCodePrepare Gremlin g.addV('person')", args{mockPrepareFrame(t, "g.addV('person')"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewPrepareRequestInfo(NewGenericRequestInfo(forwardToBoth, false, true), false, []*term{}, false, "", "g.addV('person')", "")},
+
 		// EXECUTE
 		{"OpCodeExecute origin", args{mockExecuteFrame(t, "ORIGIN"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewExecuteRequestInfo(originEntry)},
 		{"OpCodeExecute target", args{mockExecuteFrame(t, "TARGET"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewExecuteRequestInfo(targetEntry)},
@@ -128,6 +152,11 @@ func TestInspectFrame(t *testing.T) {
 		// BATCH
 		{"OpCodeBatch simple", args{mockBatch(t, "simple query"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
 		{"OpCodeBatch prepared", args{mockBatch(t, []byte("BOTH")), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{0: bothEntry})},
+		{"OpCodeBatch with Gremlin", args{mockBatch(t, "g.V().drop()"), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
+		{"OpCodeBatch mixed CQL and Gremlin", args{mockBatchWithChildren(t, []*message.BatchChild{
+			{Query: "INSERT INTO test (id, name) VALUES (1, 'test')"},
+			{Query: "g.V().has('id', 1).drop()"},
+		}), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewBatchRequestInfo(map[int]PreparedEntry{})},
 		// AUTH_RESPONSE
 		{"OpCodeAuthResponse ForwardAuthToTarget", args{mockAuthResponse(t), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToTarget}, NewGenericRequestInfo(forwardToTarget, false, false)},
 		{"OpCodeAuthResponse ForwardAuthToOrigin", args{mockAuthResponse(t), []*term{}, primaryClusterOrigin, forwardSystemQueriesToOrigin, forwardAuthToOrigin}, NewGenericRequestInfo(forwardToOrigin, false, false)},
@@ -145,10 +174,10 @@ func TestInspectFrame(t *testing.T) {
 			}}, psCache, mh, km, tt.args.primaryCluster, tt.args.forwardSystemQueriesToTarget, true, tt.args.forwardAuthToTarget, timeUuidGenerator)
 			if err != nil {
 				if !reflect.DeepEqual(err.Error(), tt.expected) {
-					t.Errorf("buildRequestInfo() actual = %v, expected %v", err, tt.expected)
+					t.Errorf("buildRequestInfo() error = %v, expected = %v", err, tt.expected)
 				}
 			} else if !reflect.DeepEqual(actual, tt.expected) {
-				t.Errorf("buildRequestInfo() actual = %v, want %v", actual, tt.expected)
+				t.Errorf("buildRequestInfo() actual = %v, want = %v", actual, tt.expected)
 			}
 		})
 	}
