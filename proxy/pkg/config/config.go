@@ -199,6 +199,14 @@ func (c *Config) GetTargetPassword(keyVault *cryptography.KeyVault) (string, err
 func (c *Config) parseEnvVars() error {
 	err := envconfig.Process("ZDM", c)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "required key") && os.Getenv("ZDM_SHELL_COMMAND") != "" {
+			return fmt.Errorf(
+				"failed to load environment variables; %w. When using the shell command feature, all "+
+					"required configuration properties must still be declared in the environment with "+
+					"an empty or dummy value",
+				err,
+			)
+		}
 		return fmt.Errorf("could not load environment variables: %w", err)
 	}
 
@@ -215,6 +223,21 @@ func (c *Config) LoadConfig(configFile string) (*Config, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	if isDefined(c.ShellCommand) {
+		// Set logging level before the shell execution logic. This is to allow for the case where
+		// the user wants to see debug messages for the shell command execution.
+		logLevel, err := c.ParseLogLevel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse log level: %w", err)
+		}
+		log.SetLevel(logLevel)
+
+		err = c.executeShellCommand()
+		if err != nil {
+			return nil, fmt.Errorf("shell command execution failed: %w", err)
+		}
 	}
 
 	err = c.Validate()
@@ -301,14 +324,6 @@ func (c *Config) Validate() error {
 	_, err := c.ParseLogLevel()
 	if err != nil {
 		return fmt.Errorf("invalid log level: %w", err)
-	}
-
-	// Execute shell command to populate configuration fields before validation
-	if isDefined(c.ShellCommand) {
-		err = c.executeShellCommand()
-		if err != nil {
-			return fmt.Errorf("shell command execution failed: %w", err)
-		}
 	}
 
 	_, err = c.ParseTargetContactPoints()
@@ -732,13 +747,10 @@ func isNotDefined(propertyValue string) bool {
 }
 
 // executeShellCommand executes the configured shell command and populates configuration fields based on the response
+//
 //	mapping. This is called during validation to dynamically set config values.
 func (c *Config) executeShellCommand() error {
-	if isNotDefined(c.ShellCommand) {
-		return nil
-	}
-
-	log.Infof("Executing shell command: %s", c.ShellCommand)
+	log.Infof("Configuring shell command execution")
 
 	var responseMapping interface{}
 
@@ -756,6 +768,7 @@ func (c *Config) executeShellCommand() error {
 	default:
 		return fmt.Errorf("unsupported MIME type '%s', must be 'text/plain' or 'application/json'", mimeType)
 	}
+	log.Debugf("Expecting shell response to be MIME type '%s'", mimeType)
 
 	if isDefined(c.ShellResponseMapping) {
 		var err error
@@ -768,9 +781,11 @@ func (c *Config) executeShellCommand() error {
 		log.Debugf("No shell response mapping defined, command output will be ignored")
 	}
 
+	log.Debugf("Set execution timeout to %d ms", c.ShellCommandTimeoutMs)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.ShellCommandTimeoutMs)*time.Millisecond)
 	defer cancel()
 
+	log.Infof("Executing shell command '%s'", c.ShellCommand)
 	cmd := exec.CommandContext(ctx, "sh", "-c", c.ShellCommand)
 	output, err := cmd.Output()
 	if err != nil {
@@ -790,6 +805,7 @@ func (c *Config) executeShellCommand() error {
 }
 
 // parseShellResponseMapping parses the JSON mapping configuration that defines which response values should be mapped
+//
 //	to which configuration fields. The format depends on the ShellResponseMimeType setting.
 func (c *Config) parseShellResponseMapping(callbackFn parserMappingCallbackFn) (interface{}, error) {
 	var rawMapping map[string]string
@@ -835,6 +851,7 @@ func (c *Config) parseJSONMapping(rawMapping map[string]string) (interface{}, er
 }
 
 // applyTextPlainResponse handles text/plain responses using position-based mapping
+//
 //	The interface{} argument is a map[int]string where keys are positions and values are field names.
 func (c *Config) applyTextPlainResponse(output string, responseMappingObj interface{}) error {
 	responseMapping := responseMappingObj.(map[int]string)
@@ -844,19 +861,25 @@ func (c *Config) applyTextPlainResponse(output string, responseMappingObj interf
 	}
 
 	values := strings.Split(strings.TrimSpace(output), delimiter)
-	log.Debugf("Split shell command output into %d values using delimiter '%s'", len(values), delimiter)
+	valuesLen := len(values)
+	log.Debugf("Split shell command output into %d values using delimiter '%s'", valuesLen, delimiter)
 
 	for position, fieldName := range responseMapping {
-		if position > len(values) {
-			return fmt.Errorf("shell response mapping position %d exceeds number of values in output (%d)", position, len(values))
+		if position > valuesLen {
+			return fmt.Errorf(
+				"shell response mapping position %d exceeds number of values in output (%d)",
+				position,
+				valuesLen,
+			)
 		}
 
 		value := strings.TrimSpace(values[position-1]) // positions are 1-based
-		log.Debugf("Setting property '%s' to value '%s' from position %d", fieldName, value, position)
+		logValue := c.redactPasswordForLogging(fieldName, value)
+		log.Debugf("Setting property '%s' to value '%s' from position %d", fieldName, logValue, position)
 
 		err := c.setConfigProperty(fieldName, value)
 		if err != nil {
-			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, value, err)
+			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, logValue, err)
 		}
 	}
 
@@ -864,6 +887,7 @@ func (c *Config) applyTextPlainResponse(output string, responseMappingObj interf
 }
 
 // applyJSONResponse handles application/json responses using key-path-based mapping.
+//
 //	The interface{} argument is a map[string]string where keys are JSON paths and values are field names.
 func (c *Config) applyJSONResponse(output string, responseMappingObj interface{}) error {
 	var jsonData interface{}
@@ -881,11 +905,12 @@ func (c *Config) applyJSONResponse(output string, responseMappingObj interface{}
 			return fmt.Errorf("failed to extract value from JSON path '%s': %w", jsonPath, err)
 		}
 
-		log.Debugf("Setting property '%s' to value '%s' from JSON path '%s'", fieldName, value, jsonPath)
+		logValue := c.redactPasswordForLogging(fieldName, value)
+		log.Debugf("Setting property '%s' to value '%s' from JSON path '%s'", fieldName, logValue, jsonPath)
 
 		err = c.setConfigProperty(fieldName, value)
 		if err != nil {
-			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, value, err)
+			return fmt.Errorf("failed to set property '%s' to value '%s': %w", fieldName, logValue, err)
 		}
 	}
 
@@ -956,6 +981,7 @@ func (c *Config) isValidConfigProperty(fieldName string) bool {
 }
 
 // setConfigProperty uses reflection to set a configuration field to the given value.
+//
 //	It handles type conversion for string, int, and bool fields.
 func (c *Config) setConfigProperty(fieldName, value string) error {
 	configValue := reflect.ValueOf(c).Elem()
@@ -990,4 +1016,11 @@ func (c *Config) setConfigProperty(fieldName, value string) error {
 
 	log.Debugf("Successfully set field '%s' to value '%s'", fieldName, value)
 	return nil
+}
+
+func (c *Config) redactPasswordForLogging(field string, value string) string {
+	if strings.Contains(field, "Password") {
+		return "<redacted>"
+	}
+	return value
 }
