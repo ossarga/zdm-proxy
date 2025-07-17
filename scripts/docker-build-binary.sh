@@ -7,6 +7,7 @@ docker build \
   --build-arg="BUILD_TYPE=${BUILD_TYPE}" \
   --tag=zdm-proxy:builder \
   --no-cache \
+  --security-opt label=disable \
   --progress=plain \
   . \
   2>&1 | tee build.log
@@ -15,7 +16,7 @@ build_result="$?"
 echo "Build result: $build_result"
 [ $build_result = 0 ] || exit $build_result
 
-zdm_proxy_build=$(grep "=== Successfully built zdm-proxy" build.log | cut -d' ' -f6)
+zdm_proxy_build=$(grep "=== Successfully built zdm-proxy" build.log | cut -d' ' -f4)
 echo "Build version: $zdm_proxy_build"
 zdm_proxy_build_container="${zdm_proxy_build}-build-$(date +%s)"
 echo "Build container: $zdm_proxy_build_container"
